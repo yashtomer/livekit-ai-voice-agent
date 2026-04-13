@@ -7,3 +7,22 @@ services:
       - "7881:7881"   # WebRTC TCP
       - "7882:7882/udp" # WebRTC UDP
     restart: unless-stopped
+
+  whisper:
+    image: fedirz/faster-whisper-server:latest-cpu
+    ports:
+      - "8100:8000"
+    environment:
+      - WHISPER__MODEL=Systran/faster-whisper-base.en
+    restart: unless-stopped
+
+  tts:
+    image: ghcr.io/matatonic/openedai-speech:latest
+    ports:
+      - "8200:8000"
+    volumes:
+      - tts-voices:/app/voices
+    restart: unless-stopped
+
+volumes:
+  tts-voices:

@@ -1,5 +1,7 @@
 import logging
+from pathlib import Path
 
+import httpx
 from dotenv import load_dotenv
 from livekit.agents import (
     Agent,
@@ -11,11 +13,16 @@ from livekit.agents import (
     cli,
     llm,
 )
-from livekit.plugins import anthropic, openai, silero
+from livekit.plugins import openai, silero
 
-load_dotenv()
+load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env")
 
 logger = logging.getLogger("voice-agent")
+
+# Local service endpoints
+OLLAMA_BASE_URL = "http://localhost:11434/v1"
+WHISPER_BASE_URL = "http://localhost:8100/v1"
+TTS_BASE_URL = "http://localhost:8200/v1"
 
 
 class VoiceAgent(Agent):
@@ -37,9 +44,23 @@ async def entrypoint(ctx: JobContext):
 
     agent = VoiceAgent()
     session = AgentSession(
-        stt=openai.STT(model="gpt-4o-transcribe"),
-        llm=anthropic.LLM(model="claude-sonnet-4-20250514"),
-        tts=openai.TTS(model="gpt-4o-mini-tts", voice="ash"),
+        stt=openai.STT(
+            model="Systran/faster-whisper-base.en",
+            base_url=WHISPER_BASE_URL,
+            api_key="local",
+        ),
+        llm=openai.LLM(
+            model="gemma4:e2b",
+            base_url=OLLAMA_BASE_URL,
+            api_key="ollama",
+            timeout=httpx.Timeout(connect=10, read=60, write=10, pool=10),
+        ),
+        tts=openai.TTS(
+            model="tts-1",
+            voice="alloy",
+            base_url=TTS_BASE_URL,
+            api_key="local",
+        ),
         vad=ctx.proc.userdata["vad"],
     )
 
@@ -51,7 +72,8 @@ async def entrypoint(ctx: JobContext):
 
 
 def prewarm(proc: JobProcess):
-    """Pre-load the Silero VAD model to avoid reloading on every session."""
+    """Pre-load the Silero VAD model and env vars in the subprocess."""
+    load_dotenv(dotenv_path=Path(__file__).resolve().parent.parent / ".env", override=True)
     proc.userdata["vad"] = silero.VAD.load()
 
 
