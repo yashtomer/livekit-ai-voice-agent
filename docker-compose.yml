@@ -1,0 +1,9 @@
+services:
+  livekit-server:
+    image: livekit/livekit-server:latest
+    command: --dev
+    ports:
+      - "7880:7880"   # Signal/API
+      - "7881:7881"   # WebRTC TCP
+      - "7882:7882/udp" # WebRTC UDP
+    restart: unless-stopped
