@@ -1,0 +1,17 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "livekit-server",
+      "runtimeExecutable": "docker",
+      "runtimeArgs": ["compose", "up"],
+      "port": 7880
+    },
+    {
+      "name": "voice-agent",
+      "runtimeExecutable": ".venv/bin/python",
+      "runtimeArgs": ["src/agent.py", "dev"],
+      "port": 8081
+    }
+  ]
+}
