@@ -9,8 +9,8 @@
     },
     {
       "name": "voice-agent",
-      "runtimeExecutable": ".venv/bin/python",
-      "runtimeArgs": ["src/agent.py", "dev"],
+      "runtimeExecutable": "uv",
+      "runtimeArgs": ["run", "python", "src/agent.py", "dev"],
       "port": 8081
     }
   ]

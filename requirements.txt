@@ -1,2 +1,0 @@
-livekit-agents[openai,silero,turn-detector,anthropic]~=1.3
-python-dotenv>=1.0
