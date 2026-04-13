@@ -28,7 +28,21 @@ You hear ← Speaker plays audio
 | VAD | Silero | ONNX | In-process | - |
 | Server | LiveKit | - | Docker | 7880 |
 
-## Prerequisites
+## Quick Start
+
+```bash
+git clone https://github.com/yashtomer/livekit-ai-voice-agent.git
+cd livekit-ai-voice-agent
+./setup.sh
+```
+
+The setup script automatically installs all dependencies, pulls models, starts services, and configures everything. After setup, run:
+
+```bash
+uv run python src/agent.py console
+```
+
+## Prerequisites (manual setup)
 
 Before starting, make sure you have these installed:
 
