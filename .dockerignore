@@ -1,0 +1,34 @@
+# Python bytecode, caches, virtual envs
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Local secrets (env is passed in via docker-compose, not baked in)
+.env
+.env.local
+
+# Git & editor cruft
+.git/
+.github/
+.idea/
+.vscode/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Voicebox — that has its own container built from voicebox/Dockerfile.
+# Skipping its source from THIS image saves ~2 GB of node_modules + Rust toolchains.
+voicebox/
+
+# Test artifacts, logs, outputs
+/tmp/
+*.log
+benchmark.py

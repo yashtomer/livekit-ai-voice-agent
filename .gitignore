@@ -2,6 +2,9 @@
 .env
 .env.local
 
+# Voicebox (external project — cloned inside this repo for convenience)
+voicebox/
+
 # Python
 __pycache__/
 *.py[cod]
