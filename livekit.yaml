@@ -1,0 +1,20 @@
+# LiveKit config for local Docker dev on macOS
+# Forces ICE candidates to use 127.0.0.1 so the browser on the host can reach WebRTC media
+
+port: 7880
+bind_addresses:
+  - "0.0.0.0"
+
+rtc:
+  tcp_port: 7881
+  udp_port: 7882
+  use_external_ip: false
+  # Advertise 127.0.0.1 as the IP for ICE candidates so host browsers can connect
+  nat_1_to_1_ips:
+    - "127.0.0.1"
+
+keys:
+  devkey: secret
+
+logging:
+  level: info
