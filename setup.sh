@@ -144,11 +144,17 @@ else
     print_warn "LiveKit Server not ready yet"
 fi
 
-if [ "$(curl -s http://localhost:8100/health 2>/dev/null)" = "OK" ]; then
-    print_ok "Whisper STT (port 8100)"
-else
-    print_warn "Whisper STT still loading (may take a minute)"
-fi
+for port in 8100 8101 8102; do
+    if [ "$(curl -s http://localhost:$port/health 2>/dev/null)" = "OK" ]; then
+        case $port in
+            8100) print_ok "Whisper base.en (port 8100)" ;;
+            8101) print_ok "Whisper small.en (port 8101)" ;;
+            8102) print_ok "Whisper tiny.en (port 8102)" ;;
+        esac
+    else
+        print_warn "Whisper on port $port still loading"
+    fi
+done
 
 if curl -s http://localhost:8200/v1/models &>/dev/null; then
     print_ok "Piper TTS (port 8200)"
@@ -157,9 +163,9 @@ else
 fi
 
 # ─── Step 5: Install Python dependencies ───
-print_step 5 "Installing Python dependencies..."
+print_step 5 "Installing Python dependencies (with UI extras)..."
 
-uv sync 2>&1 | tail -3
+uv sync --extra ui 2>&1 | tail -3
 print_ok "Dependencies installed"
 
 # ─── Step 6: Configure environment ───
@@ -188,7 +194,13 @@ echo -e "${NC}"
 echo "  Run the agent:"
 echo ""
 echo -e "    ${BLUE}uv run python src/agent.py console${NC}    # Test with mic/speaker"
-echo -e "    ${BLUE}uv run python src/agent.py dev${NC}        # Connect via browser"
+echo -e "    ${BLUE}uv run python src/agent.py dev${NC}        # For browser UI"
+echo ""
+echo "  Start the web UI (in a second terminal):"
+echo ""
+echo -e "    ${BLUE}uv run --extra ui uvicorn src.token_server:app --reload --port 8000${NC}"
+echo ""
+echo "  Then open: http://localhost:8000"
 echo ""
 echo "  Stop everything:"
 echo ""
