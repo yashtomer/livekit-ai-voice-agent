@@ -100,12 +100,14 @@ Make sure Docker Desktop is running, then:
 docker compose up -d
 ```
 
-This starts three services:
+This starts five services:
 
 | Service | Image | Port | Purpose |
 |---------|-------|------|---------|
 | `livekit-server` | `livekit/livekit-server` | 7880 | WebRTC audio transport |
-| `whisper` | `fedirz/faster-whisper-server` | 8100 | Speech-to-text |
+| `whisper-base` | `fedirz/faster-whisper-server` | 8100 | Speech-to-text (base.en) |
+| `whisper-small` | `fedirz/faster-whisper-server` | 8101 | Speech-to-text (small.en) |
+| `whisper-tiny` | `fedirz/faster-whisper-server` | 8102 | Speech-to-text (tiny.en) |
 | `tts` | `ghcr.io/matatonic/openedai-speech` | 8200 | Text-to-speech |
 
 Verify all services are running:
@@ -117,8 +119,10 @@ docker compose ps
 ### Step 5: Install Python dependencies
 
 ```bash
-uv sync
+uv sync --extra ui
 ```
+
+The `--extra ui` flag installs FastAPI + uvicorn for the web UI. Add `--extra cloud` too if you want Anthropic Claude as an LLM option.
 
 ### Step 6: Configure environment
 
@@ -158,7 +162,59 @@ Connects to the LiveKit server for browser-based access:
 uv run python src/agent.py dev
 ```
 
-Then connect via the [LiveKit Agents Playground](https://agents-playground.livekit.io) or any LiveKit client.
+Then either:
+- Use the [built-in web UI](#web-ui) at `http://localhost:8000` (recommended)
+- Or connect via the [LiveKit Agents Playground](https://agents-playground.livekit.io)
+
+## Web UI
+
+The project ships with a local web UI that lets you pick models and test the agent in a browser.
+
+### Start the stack (3 terminals)
+
+```bash
+# Terminal 1 — Docker services
+docker compose up
+
+# Terminal 2 — Voice agent
+uv run python src/agent.py dev
+
+# Terminal 3 — Token server + UI
+uv run --extra ui uvicorn src.token_server:app --reload --port 8000
+```
+
+Then open **http://localhost:8000** in your browser, pick an LLM / STT / TTS combination, and click **Start Call**.
+
+### What the UI provides
+
+- **LLM dropdown**: all Ollama models on your machine + Groq/Anthropic (if API keys are set)
+- **STT dropdown**: Whisper tiny / base / small — all running simultaneously on different ports
+- **TTS dropdown**: 6 Piper voices (alloy, echo, fable, onyx, nova, shimmer)
+- **Transcript panel**: live speech-to-text and agent responses
+- **Live config switching**: select different models per call without restarting anything
+
+### Pulling more Ollama models to compare
+
+```bash
+ollama pull phi3:mini      # 1.5GB — much faster on CPU
+ollama pull llama3.2:1b    # 1.3GB — very fast
+ollama pull qwen2.5:0.5b   # 400MB — blazingly fast
+```
+
+Any model in `ollama list` will show up automatically in the UI dropdown.
+
+### Enabling cloud LLMs
+
+```bash
+# Install the cloud plugin
+uv sync --extra cloud
+
+# Add keys to .env
+echo "GROQ_API_KEY=your-key-here" >> .env
+echo "ANTHROPIC_API_KEY=your-key-here" >> .env
+
+# Restart token server — Groq/Anthropic options appear in the dropdown
+```
 
 ### Console vs Dev mode
 
@@ -220,11 +276,16 @@ brew services stop ollama
 ```
 livekit-ai-voice-agent/
 ├── src/
-│   └── agent.py           # Main voice agent code
+│   ├── agent.py            # Main voice agent (reads config from room metadata)
+│   └── token_server.py     # FastAPI token server + UI host
+├── web/
+│   ├── index.html          # Web UI
+│   ├── app.js              # LiveKit client logic
+│   └── styles.css          # UI styles
 ├── .env.example            # Environment variable template
 ├── .claude/
 │   └── launch.json         # Dev server configurations
-├── docker-compose.yml      # LiveKit + Whisper + TTS services
+├── docker-compose.yml      # LiveKit + 3×Whisper + TTS services
 ├── pyproject.toml          # Project metadata and dependencies
 └── uv.lock                 # Locked dependency versions
 ```

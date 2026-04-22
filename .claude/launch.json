@@ -5,13 +5,32 @@
       "name": "livekit-server",
       "runtimeExecutable": "docker",
       "runtimeArgs": ["compose", "up"],
-      "port": 7880
+      "port": 7880,
+      "autoPort": false
     },
     {
       "name": "voice-agent",
       "runtimeExecutable": "uv",
       "runtimeArgs": ["run", "python", "src/agent.py", "dev"],
       "port": 8081
+    },
+    {
+      "name": "token-ui-server",
+      "runtimeExecutable": "uv",
+      "runtimeArgs": [
+        "run",
+        "--extra",
+        "ui",
+        "uvicorn",
+        "src.token_server:app",
+        "--host",
+        "127.0.0.1",
+        "--port",
+        "8000",
+        "--reload"
+      ],
+      "port": 8000,
+      "autoPort": false
     }
   ]
 }
