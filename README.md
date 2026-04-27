@@ -1,291 +1,341 @@
-# LiveKit AI Voice Agent (Fully Local)
+# AI Voice Cost Calculator
 
-A real-time AI voice assistant that runs **100% locally** with zero API costs. Built with [LiveKit Agents](https://github.com/livekit/agents), Ollama, Whisper, and Piper TTS.
+A full-stack platform for running live AI voice calls with real-time cost estimation. Built with LiveKit Agents, FastAPI, PostgreSQL, and React.
 
-## How It Works
+Compare STT, LLM, and TTS providers side-by-side, estimate monthly infrastructure costs, and make real WebRTC voice calls — all from one dashboard.
 
-```
-You speak → Mic captures audio
-              ↓
-         Silero VAD (detects speech)
-              ↓
-         Faster-Whisper (speech → text)
-              ↓
-         Gemma 4 LLM (generates response)
-              ↓
-         Piper TTS (text → speech)
-              ↓
-You hear ← Speaker plays audio
-```
+![Dashboard](https://img.shields.io/badge/stack-FastAPI%20%7C%20React%20%7C%20LiveKit%20%7C%20PostgreSQL-blue)
+
+---
+
+## Features
+
+- **Multi-provider voice pipeline** — mix and match STT, LLM, and TTS from different providers per call.
+- **Live voice calls** — real WebRTC calls via LiveKit with mute, timer, and auto-disconnect.
+- **Real-time metrics** — STT / LLM / TTS latency, TTFT, tokens/sec, and traffic-light quality dots after each turn.
+- **Smart cost estimator** — auto-picks AWS or GCP server tier based on each model's `compute_profile`; concurrency-aware (`ceil(agents / capacity)`); editable traffic baselines (LLM tokens/hr, TTS chars/hr).
+- **Per-user usage quotas** — admin-tunable concurrent + daily call limits prevent vendor-bill leakage.
+- **Configurable everywhere** — every host port and the entire DB connection string come from `.env`; ready to redeploy behind a different domain or port set.
+- **Admin panel** — manage models (price, label, `compute_profile`, reset-to-seed), users, quotas, and tail backend logs live.
+- **Role-based auth** — JWT login; admin / customer roles; customer-supplied API keys encrypted with Fernet at rest.
+- **Model search & sort** — filter by type, search by name, sort by any column.
+
+---
+
+## Supported Providers
+
+| Category | Providers |
+|---|---|
+| **STT** | Deepgram Nova-3/2, Groq Whisper, OpenAI Whisper-1, local Whisper (tiny/base/small, EN + multilingual) |
+| **LLM** | Groq (Llama 4, Llama 3.3, Qwen3), OpenAI (GPT-4.1, GPT-4o), Google Gemini 2.5/2.0/1.5, Anthropic Claude (Haiku/Sonnet/Opus), DeepSeek V3, Ollama (local) |
+| **TTS** | ElevenLabs Flash v2.5, OpenAI TTS-1/HD, Azure Neural, Edge TTS (free), Groq Orpheus, Piper (local, free) |
+
+---
 
 ## Architecture
 
-| Component | Provider | Model | Runs on | Port |
-|-----------|----------|-------|---------|------|
-| STT | Faster-Whisper | `base.en` | Docker | 8100 |
-| LLM | Ollama | Gemma 4 (2B) | Native | 11434 |
-| TTS | OpenedAI-Speech (Piper) | `alloy` | Docker | 8200 |
-| VAD | Silero | ONNX | In-process | - |
-| Server | LiveKit | - | Docker | 7880 |
+```
+Host
+  │
+  ├─ PostgreSQL (system-installed) ◄────── DATABASE_URL via host.docker.internal
+  │
+  └─ Docker Compose
+       │
+       ├─ Browser ─► React / Vite (port 3000) ─── WebRTC ─► LiveKit Server (7880)
+       │                                                          │
+       │                  REST / JWT ─► FastAPI (port 8000)       │
+       │                                       │             Agent Worker
+       │                                       └─ Token endpoint │
+       │                                                          │
+       └─ Whisper (8100-8104) · Piper (8200) · Voicebox (17493)  │
+                                                              ┌────┴─────┐
+                                                              STT → LLM → TTS
+```
+
+**Call flow:**
+1. Browser requests a token from the FastAPI backend (selected model config embedded in metadata).
+2. Agent worker picks up the room, reads metadata, and builds the STT → LLM → TTS pipeline.
+3. Real-time transcript + per-stage latency metrics are sent back to the browser via LiveKit data messages.
+
+**Database:** PostgreSQL runs on the host (not in Docker) so DB lifecycle is decoupled from `docker compose`. Backend reaches it via `host.docker.internal`.
+
+---
 
 ## Quick Start
 
 ```bash
-git clone https://github.com/yashtomer/livekit-ai-voice-agent.git
+git clone <repo-url>
 cd livekit-ai-voice-agent
-./setup.sh
-```
 
-The setup script automatically installs all dependencies, pulls models, starts services, and configures everything. After setup, run:
+# 1. Create the database on your host Postgres (one-time).
+#    Defaults expect user=postgres, password=password, db=voiceagent;
+#    override via .env if your local install differs.
+psql -U postgres -c "CREATE DATABASE voiceagent;"
 
-```bash
-uv run python src/agent.py console
-```
+# 2. Copy the env template and fill in API keys.
+cp .env.example .env
 
-## Prerequisites (manual setup)
-
-Before starting, make sure you have these installed:
-
-| Tool | Install | Verify |
-|------|---------|--------|
-| **Python 3.10+** | [python.org](https://www.python.org/) | `python3 --version` |
-| **uv** | `curl -LsSf https://astral.sh/uv/install.sh \| sh` | `uv --version` |
-| **Docker Desktop** | [docker.com](https://docs.docker.com/get-docker/) | `docker --version` |
-| **Ollama** | `brew install ollama` (macOS) or [ollama.com](https://ollama.com/) | `ollama --version` |
-
-## Setup (Step by Step)
-
-### Step 1: Clone the repository
-
-```bash
-git clone https://github.com/yashtomer/livekit-ai-voice-agent.git
-cd livekit-ai-voice-agent
-```
-
-### Step 2: Install and start Ollama
-
-**macOS:**
-
-```bash
-brew install ollama
-brew services start ollama
-```
-
-**Linux:**
-
-```bash
-curl -fsSL https://ollama.com/install.sh | sh
-systemctl start ollama
-```
-
-Verify Ollama is running:
-
-```bash
-curl http://localhost:11434/v1/models
-```
-
-### Step 3: Pull the LLM model
-
-```bash
-ollama pull gemma4:e2b
-```
-
-This downloads Gemma 4 (2B parameters, ~7GB). It only needs to download once.
-
-### Step 4: Start Docker services
-
-Make sure Docker Desktop is running, then:
-
-```bash
+# 3. Start everything.
 docker compose up -d
 ```
 
-This starts five services:
+The backend auto-runs Postgres column migrations, seeds the default model catalogue, and downloads the LiveKit turn-detector model into a shared volume on first start. **No manual `download-files` step is needed.**
 
-| Service | Image | Port | Purpose |
-|---------|-------|------|---------|
-| `livekit-server` | `livekit/livekit-server` | 7880 | WebRTC audio transport |
-| `whisper-base` | `fedirz/faster-whisper-server` | 8100 | Speech-to-text (base.en) |
-| `whisper-small` | `fedirz/faster-whisper-server` | 8101 | Speech-to-text (small.en) |
-| `whisper-tiny` | `fedirz/faster-whisper-server` | 8102 | Speech-to-text (tiny.en) |
-| `tts` | `ghcr.io/matatonic/openedai-speech` | 8200 | Text-to-speech |
+Open **http://localhost:3000** and log in with the admin credentials from your `.env`.
 
-Verify all services are running:
+---
 
-```bash
-docker compose ps
-```
+## Development Setup
 
-### Step 5: Install Python dependencies
+Run infrastructure in Docker and the app natively for hot-reload.
 
-```bash
-uv sync --extra ui
-```
+### 1. Prerequisites
 
-The `--extra ui` flag installs FastAPI + uvicorn for the web UI. Add `--extra cloud` too if you want Anthropic Claude as an LLM option.
+| Tool | Install |
+|---|---|
+| PostgreSQL 14+ (host-installed) | `brew install postgresql@16` (macOS) / package manager (Linux) |
+| Python 3.11+ | [python.org](https://python.org) |
+| uv | `curl -LsSf https://astral.sh/uv/install.sh \| sh` |
+| Node 18+ | [nodejs.org](https://nodejs.org) |
+| Docker Desktop | [docker.com](https://docs.docker.com/get-docker/) |
 
-### Step 6: Configure environment
+### 2. Database
 
 ```bash
-cp .env.example .env
+# Create the project DB once.
+createdb voiceagent
+# Optionally create a dedicated role:
+psql -d postgres -c "CREATE USER va WITH PASSWORD 'password'; GRANT ALL ON DATABASE voiceagent TO va;"
 ```
 
-No API keys needed — everything runs locally!
+Set matching values in `.env` (`POSTGRES_USER`, `POSTGRES_PASSWORD`, etc.).
 
-### Step 7: Download required model files
+### 3. LiveKit + supporting services
 
 ```bash
-uv run python src/agent.py download-files
+docker compose up -d livekit-server tts whisper-base
 ```
 
-This downloads the Silero VAD model (~2MB) used for voice activity detection.
-
-## Running the Agent
-
-### Console mode (quickest way to test)
-
-Uses your local microphone and speakers directly:
+### 4. Backend
 
 ```bash
-uv run python src/agent.py console
+cd backend
+uv sync
+# Native: backend reaches host Postgres at localhost:5432 (via .env override).
+POSTGRES_HOST=localhost uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
-- No LiveKit server connection needed
-- Just speak into your mic and the agent responds
-- Press `Ctrl+C` to stop
+### 5. Agent worker
 
-### Development mode (for building a real app)
-
-Connects to the LiveKit server for browser-based access:
+The backend auto-downloads the turn-detector model on startup. For native dev:
 
 ```bash
-uv run python src/agent.py dev
+cd backend
+uv run python agent.py start
 ```
 
-Then either:
-- Use the [built-in web UI](#web-ui) at `http://localhost:8000` (recommended)
-- Or connect via the [LiveKit Agents Playground](https://agents-playground.livekit.io)
-
-## Web UI
-
-The project ships with a local web UI that lets you pick models and test the agent in a browser.
-
-### Start the stack (3 terminals)
+### 6. Frontend
 
 ```bash
-# Terminal 1 — Docker services
-docker compose up
-
-# Terminal 2 — Voice agent
-uv run python src/agent.py dev
-
-# Terminal 3 — Token server + UI
-uv run --extra ui uvicorn src.token_server:app --reload --port 8000
+cd frontend
+npm install
+npm run dev    # uses VITE_BACKEND_URL or BACKEND_PORT to find the API
 ```
 
-Then open **http://localhost:8000** in your browser, pick an LLM / STT / TTS combination, and click **Start Call**.
+Open **http://localhost:3000**
 
-### What the UI provides
+---
 
-- **LLM dropdown**: all Ollama models on your machine + Groq/Anthropic (if API keys are set)
-- **STT dropdown**: Whisper tiny / base / small — all running simultaneously on different ports
-- **TTS dropdown**: 6 Piper voices (alloy, echo, fable, onyx, nova, shimmer)
-- **Transcript panel**: live speech-to-text and agent responses
-- **Live config switching**: select different models per call without restarting anything
+## Environment Variables
 
-### Pulling more Ollama models to compare
+Copy `.env.example` to `.env` and fill in the keys for the providers you want to use.
 
+```env
+# ─── Database (system-installed Postgres on host) ────────────────────
+POSTGRES_HOST=host.docker.internal   # or `localhost` for native dev
+POSTGRES_PORT=5432
+POSTGRES_USER=postgres
+POSTGRES_PASSWORD=password
+POSTGRES_DB=voiceagent
+
+# ─── Host port mappings (change when deploying) ──────────────────────
+BACKEND_PORT=8000
+FRONTEND_PORT=3000
+LIVEKIT_PORT=7880
+TTS_PORT=8200
+VOICEBOX_PORT=17493
+WHISPER_BASE_PORT=8100        # + WHISPER_SMALL_PORT, WHISPER_TINY_PORT, …
+
+# ─── Public URL the browser sees (override behind a proxy) ───────────
+# LIVEKIT_PUBLIC_URL=ws://your.domain:7880
+
+# ─── Auth + secrets ──────────────────────────────────────────────────
+LIVEKIT_API_KEY=devkey
+LIVEKIT_API_SECRET=<your-secret>     # must match livekit.yaml
+SECRET_KEY=<random-hex-32>           # JWT signing key
+FERNET_KEY=<fernet-key>              # encrypts customer API keys at rest
+
+# ─── Admin account (created on first startup) ────────────────────────
+ADMIN_EMAIL=admin@example.com
+ADMIN_PASSWORD=***REMOVED***
+
+# ─── Provider API keys (only needed for providers you actually use) ──
+GROQ_API_KEY=
+OPENAI_API_KEY=
+ANTHROPIC_API_KEY=
+GOOGLE_API_KEY=
+DEEPGRAM_API_KEY=
+ELEVENLABS_API_KEY=
+DEEPSEEK_API_KEY=
+```
+
+Generate keys:
 ```bash
-ollama pull phi3:mini      # 1.5GB — much faster on CPU
-ollama pull llama3.2:1b    # 1.3GB — very fast
-ollama pull qwen2.5:0.5b   # 400MB — blazingly fast
+# SECRET_KEY
+python3 -c "import secrets; print(secrets.token_hex(32))"
+
+# FERNET_KEY
+python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())"
 ```
 
-Any model in `ollama list` will show up automatically in the UI dropdown.
+---
 
-### Enabling cloud LLMs
+## Services & Ports
 
-```bash
-# Install the cloud plugin
-uv sync --extra cloud
+All host-facing ports are env-configurable. The container-internal ports stay
+constant inside the Compose network — only the host-side mapping moves when
+you change `*_PORT` in `.env`.
 
-# Add keys to .env
-echo "GROQ_API_KEY=your-key-here" >> .env
-echo "ANTHROPIC_API_KEY=your-key-here" >> .env
+| Service | Default port | Env var |
+|---|---|---|
+| Frontend (dev) | 3000 | `FRONTEND_PORT` |
+| Backend | 8000 | `BACKEND_PORT` |
+| LiveKit signal | 7880 | `LIVEKIT_PORT` |
+| LiveKit RTC TCP | 7881 | `LIVEKIT_RTC_PORT` |
+| LiveKit RTC UDP | 7882 | `LIVEKIT_UDP_PORT` |
+| Whisper tiny / base / small | 8102 / 8100 / 8101 | `WHISPER_TINY_PORT` etc. |
+| Whisper multi (base / small) | 8103 / 8104 | `WHISPER_BASE_MULTI_PORT` etc. |
+| Piper TTS | 8200 | `TTS_PORT` |
+| Voicebox | 17493 | `VOICEBOX_PORT` |
+| PostgreSQL | 5432 | `POSTGRES_PORT` (on host, not Docker) |
 
-# Restart token server — Groq/Anthropic options appear in the dropdown
+---
+
+## Admin Panel
+
+Log in as admin to access the **Admin** tab in the top navigation.
+
+| Tab | What you can do |
+|---|---|
+| **Models** | Enable / disable models, edit label / price / `compute_profile` inline, reset edited rows back to seed defaults, search / filter / sort, sync seed data |
+| **Users** | Add users, toggle active status, assign roles (admin / customer) |
+| **Settings** | Per-call duration limit · max concurrent calls per user · max calls per user per day |
+| **Logs** | Live-tailing backend logs with level filtering and auto-scroll |
+
+**Customer onboarding flow** (admin → customer):
+1. Create a customer account in the Users tab.
+2. Decide quotas in the Settings tab — defaults are 2 concurrent calls and 50/day per user.
+3. Send the customer the URL + their credentials. They can immediately use any FREE local model (Whisper, Piper, Edge, Voicebox, Ollama). To unlock cloud providers, they add their own API keys in the Config modal.
+
+At least one admin account must remain active — the last active admin cannot be disabled.
+
+---
+
+## API Keys
+
+Provider API keys are stored encrypted (AES-256 Fernet) in PostgreSQL. Admins set keys in the **Config** modal; they are injected into LiveKit participant metadata at call time so the agent worker never stores them in memory beyond the call duration.
+
+---
+
+## Cost Estimation
+
+The Cost Estimator computes monthly cost as:
+
+```
+sttCost    = stt.price_per_hour × agents × hours/day × days/month
+llmCost    = llm.price_per_hour × agents × hours/day × days/month × (custom_tokens_per_hour / 30,000)
+ttsCost    = tts.price_per_hour × agents × hours/day × days/month × (custom_chars_per_hour / 50,000)
+serverCost = ceil(agents / tier.concurrent_capacity) × hours/day × days/month × tier.$/hr
+total      = sttCost + llmCost + ttsCost + serverCost
 ```
 
-### Console vs Dev mode
+Defaults for the tunable baselines:
 
-| | Console | Dev |
-|--|---------|-----|
-| Audio | Local mic/speaker | WebRTC via browser |
-| LiveKit server | Not needed | Required (port 7880) |
-| Multiple users | No | Yes |
-| Use case | Quick testing | Building a product |
+| Type | Baseline | Note |
+|---|---|---|
+| STT | 1 hr audio = 1 hr cost | Real-time billing |
+| LLM | 30,000 tokens/hr (15K in + 15K out, ~3 turns/min) | Customer-tunable in the UI |
+| TTS | 50,000 chars/hr (agent speaks ~50% @ 150 wpm × 5 chars/word) | Customer-tunable in the UI |
 
-## Verify Everything Works
+**Server tiers** are auto-recommended from each model's `compute_profile`
+(`none / cpu_light / cpu_heavy / gpu_small / gpu_mid / gpu_large`); the BEST
+option is auto-selected and labelled `✨ AUTO`. One server hosts multiple
+concurrent voice agents (an A10G runs ~5 small-LLM streams), so the cost
+formula scales with `ceil(agents / concurrent_capacity)`, not with the agent
+count itself.
 
-Run these checks to make sure all services are healthy:
+**Quotas** prevent vendor-bill leakage: each customer is limited to
+`max_concurrent_calls_per_user` (default 2) and `max_calls_per_day_per_user`
+(default 50). Both are admin-tunable. Admins are exempt.
 
-```bash
-# 1. Ollama (LLM)
-curl -s http://localhost:11434/v1/models | python3 -m json.tool
-
-# 2. Whisper (STT)
-curl -s http://localhost:8100/health
-
-# 3. TTS
-curl -s http://localhost:8200/v1/models | python3 -m json.tool
-
-# 4. LiveKit Server
-curl -s http://localhost:7880
-```
-
-## Troubleshooting
-
-| Problem | Solution |
-|---------|----------|
-| `docker compose` fails | Make sure Docker Desktop is running |
-| Ollama model not found | Run `ollama pull gemma4:e2b` |
-| LLM timeout errors | Normal on CPU — responses take ~13s |
-| `termios` error in console | Harmless — only affects keyboard shortcuts |
-| Whisper not transcribing | Wait 15s after `docker compose up` for model to load |
-| No audio output | Check your speaker/mic permissions in System Settings |
-
-## Stopping Everything
-
-```bash
-# Stop the agent
-Ctrl+C
-
-# Stop Docker services
-docker compose down
-
-# Stop Ollama
-brew services stop ollama
-```
-
-## Cost
-
-**$0/month** — all models run locally. No external API calls, no rate limits, no data leaving your machine.
+---
 
 ## Project Structure
 
 ```
 livekit-ai-voice-agent/
-├── src/
-│   ├── agent.py            # Main voice agent (reads config from room metadata)
-│   └── token_server.py     # FastAPI token server + UI host
-├── web/
-│   ├── index.html          # Web UI
-│   ├── app.js              # LiveKit client logic
-│   └── styles.css          # UI styles
-├── .env.example            # Environment variable template
-├── .claude/
-│   └── launch.json         # Dev server configurations
-├── docker-compose.yml      # LiveKit + 3×Whisper + TTS services
-├── pyproject.toml          # Project metadata and dependencies
-└── uv.lock                 # Locked dependency versions
+├── backend/
+│   ├── app/
+│   │   ├── main.py              # FastAPI app · startup migrations · seed reconcile
+│   │   ├── seed_data.py         # Default model catalog + compute_profile_for()
+│   │   ├── log_buffer.py        # In-memory log ring buffer (500 lines)
+│   │   ├── models/              # SQLAlchemy ORM models
+│   │   ├── routes/
+│   │   │   ├── auth.py          # Login / token refresh
+│   │   │   ├── admin_route.py   # Models · users · settings · logs · reset_to_seed
+│   │   │   ├── token_route.py   # LiveKit token generation + quota enforcement
+│   │   │   ├── models_route.py  # Customer model catalog (filters by API keys)
+│   │   │   ├── setup_route.py   # Turn-detector model download status
+│   │   │   ├── tts_route.py     # Edge / Voicebox TTS sample
+│   │   │   └── fx_route.py      # USD → INR exchange rate
+│   │   └── services/
+│   │       ├── auth.py          # JWT + bcrypt
+│   │       ├── encryption.py    # Fernet API key encryption
+│   │       ├── livekit_svc.py   # Token signing (uses LIVEKIT_PUBLIC_URL)
+│   │       ├── model_setup.py   # Async turn-detector model downloader
+│   │       └── model_sync.py    # Reconciles dynamic Ollama / Voicebox models
+│   └── agent.py                 # LiveKit agent worker (warmups + JIT loaders)
+├── frontend/
+│   └── src/
+│       ├── pages/Dashboard.tsx
+│       ├── components/
+│       │   ├── AdminPanel/      # Admin tabs (models / users / settings / logs)
+│       │   ├── CallInterface/   # WebRTC call controls + setup-ready modal
+│       │   ├── ConfigModal/     # Customer API-key entry (encrypted at rest)
+│       │   ├── CostEstimator/   # Auto-recommended server tier · concurrency
+│       │   │                    #   model · editable traffic baselines
+│       │   ├── MetricsPanel/    # Live STT/LLM/TTS latency + quality dots
+│       │   ├── TranscriptPanel/ # Conversation transcript
+│       │   └── LoginPage/
+│       └── store/               # Zustand: auth · call · models
+├── docker-compose.yml           # All host ports env-driven; no postgres container
+├── livekit.yaml                 # LiveKit server config (keys + ICE)
+└── .env                         # Secrets, ports, DB connection, API keys
 ```
+
+---
+
+## Troubleshooting
+
+| Problem | Fix |
+|---|---|
+| Backend can't reach Postgres | Confirm host Postgres is running and listens on `POSTGRES_PORT`. Inside Docker, `POSTGRES_HOST` must be `host.docker.internal` (already the default). |
+| `could not establish signal connection` | LiveKit container not running — `docker compose up -d livekit-server`. |
+| `could not establish pc connection` | ICE IP mismatch — ensure `livekit.yaml` is mounted and `--node-ip 127.0.0.1` is set. |
+| Browser says `403 Account is disabled` | Admin disabled the user — re-enable in Admin → Users. |
+| `429 Concurrent-call limit reached` | The customer hit their quota — bump it in Admin → Settings, or wait for active calls to finish. |
+| Turn-detector model missing | Backend auto-downloads on startup. If it failed (no internet at first start), open Admin → check the setup endpoint. |
+| `Ollama unreachable` warning | Normal if Ollama is not installed — local LLM models won't appear. |
+| FX rate not showing | Frankfurter API unreachable — badge is hidden automatically. |
+| Last admin can't be disabled | By design — activate another admin account first. |
+| Re-seeding clobbered an admin price edit | Won't happen: rows admins have edited get `is_seed=false` and are skipped by the reseed reconcile. Click "Reset to seed" on a row to re-adopt the seed default. |

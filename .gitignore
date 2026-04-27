@@ -1,6 +1,8 @@
 # Environment
 .env
 .env.local
+.env.*.local
+.claude
 
 # Voicebox (external project — cloned inside this repo for convenience)
 voicebox/
@@ -13,11 +15,26 @@ __pycache__/
 *.egg-info/
 dist/
 build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
 
 # Virtual environments
 .venv/
 venv/
 env/
+
+# Node
+node_modules/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Frontend build output
+frontend/dist/
 
 # IDE
 .vscode/
@@ -28,3 +45,6 @@ env/
 # OS
 .DS_Store
 Thumbs.db
+
+# Logs
+*.log

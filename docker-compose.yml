@@ -1,47 +1,44 @@
 # ════════════════════════════════════════════════════════════════════
-# Single-command startup for the entire voice-agent stack.
+# AI Voice Cost Calculator — Full stack
 #
 #   docker compose up -d           # start everything
-#   docker compose logs -f agent   # tail any one service
-#   docker compose down            # stop everything (volumes preserved)
+#   docker compose logs -f backend # tail any service
+#   docker compose down            # stop (volumes preserved)
 #
-# What comes up:
-#   - livekit-server       (:7880)  — WebRTC media server, dev mode
-#   - whisper-*            (:8100-8104) — 5 Whisper flavors for STT
-#   - tts (Piper)          (:8200)  — free local English TTS
-#   - voicebox             (:17493) — Voicebox TTS (Kokoro + others, voice cloning)
-#   - token-server         (:8000)  — FastAPI + static web UI (MAIN ENTRY POINT)
-#   - agent                          — LiveKit worker, no exposed port
+# Database: uses the host's system-installed PostgreSQL (NOT a container).
+# Set POSTGRES_HOST/PORT/USER/PASSWORD/DB in .env. Defaults connect to
+# host.docker.internal:5432 with user `postgres` / password `password`.
 #
-# Ollama stays on the HOST — bundling it would double-download your existing
-# models. The containers reach it at host.docker.internal:11434.
-# If you prefer Ollama in Docker too, uncomment the `ollama` service.
+# Services:
+#   - livekit-server (:7880)    — WebRTC media server
+#   - whisper-*      (:8100-8104) — Whisper STT variants
+#   - tts (Piper)    (:8200)    — free local TTS
+#   - voicebox       (:17493)   — local ElevenLabs alternative
+#   - backend        (:8000)    — FastAPI backend (MAIN ENTRY POINT)
+#   - frontend       (:3000)    — React/Vite UI
+#   - agent                     — LiveKit worker
+#
+# All host-facing ports are env-configurable — see .env.example.
 # ════════════════════════════════════════════════════════════════════
 
 services:
 
   # ─── LiveKit WebRTC media server ───
-  # --dev enables built-in devkey/secret creds + permissive CORS. For prod,
-  # run without --dev and mount livekit.yaml with real keys.
   livekit-server:
     image: livekit/livekit-server:latest
-    command: --dev --bind 0.0.0.0 --node-ip 127.0.0.1
+    command: --config /etc/livekit.yaml --node-ip 127.0.0.1
+    volumes:
+      - ./livekit.yaml:/etc/livekit.yaml:ro
     ports:
-      - "7880:7880"    # Signaling + HTTP API (browser WS connection)
-      - "7881:7881"    # WebRTC TCP fallback
-      - "7882:7882/udp" # WebRTC UDP (main media path)
+      - "${LIVEKIT_PORT:-7880}:7880"
+      - "${LIVEKIT_RTC_PORT:-7881}:7881"
+      - "${LIVEKIT_UDP_PORT:-7882}:7882/udp"
     restart: unless-stopped
 
   # ─── Whisper STT containers ───
-  # Five sizes: tiny/base/small (English-only .en) + base-multi/small-multi
-  # (99 languages). All use CTranslate2 int8 for CPU speed.
-  #
-  # OMP_NUM_THREADS=8 matches threads to cores. Without it CTranslate2 uses
-  # min(4, cores/2) by default which leaves a 16-core box at ~25% utilization.
-  # int8 gives a 2-4× speedup over the float32 CPU fallback.
   whisper-base:
     image: fedirz/faster-whisper-server:latest-cpu
-    ports: ["8100:8000"]
+    ports: ["${WHISPER_BASE_PORT:-8100}:8000"]
     environment:
       - WHISPER__MODEL=Systran/faster-whisper-base.en
       - WHISPER__COMPUTE_TYPE=int8
@@ -51,7 +48,7 @@ services:
 
   whisper-small:
     image: fedirz/faster-whisper-server:latest-cpu
-    ports: ["8101:8000"]
+    ports: ["${WHISPER_SMALL_PORT:-8101}:8000"]
     environment:
       - WHISPER__MODEL=Systran/faster-whisper-small.en
       - WHISPER__COMPUTE_TYPE=int8
@@ -61,7 +58,7 @@ services:
 
   whisper-tiny:
     image: fedirz/faster-whisper-server:latest-cpu
-    ports: ["8102:8000"]
+    ports: ["${WHISPER_TINY_PORT:-8102}:8000"]
     environment:
       - WHISPER__MODEL=Systran/faster-whisper-tiny.en
       - WHISPER__COMPUTE_TYPE=int8
@@ -71,7 +68,7 @@ services:
 
   whisper-base-multi:
     image: fedirz/faster-whisper-server:latest-cpu
-    ports: ["8103:8000"]
+    ports: ["${WHISPER_BASE_MULTI_PORT:-8103}:8000"]
     environment:
       - WHISPER__MODEL=Systran/faster-whisper-base
       - WHISPER__COMPUTE_TYPE=int8
@@ -80,38 +77,29 @@ services:
 
   whisper-small-multi:
     image: fedirz/faster-whisper-server:latest-cpu
-    ports: ["8104:8000"]
+    ports: ["${WHISPER_SMALL_MULTI_PORT:-8104}:8000"]
     environment:
       - WHISPER__MODEL=Systran/faster-whisper-small
       - WHISPER__COMPUTE_TYPE=int8
       - OMP_NUM_THREADS=4
     restart: unless-stopped
 
-  # ─── Piper (openedai-speech) — fallback English TTS ───
+  # ─── Piper TTS ───
   tts:
     image: ghcr.io/matatonic/openedai-speech:latest
-    ports: ["8200:8000"]
+    ports: ["${TTS_PORT:-8200}:8000"]
     volumes:
       - tts-voices:/app/voices
     restart: unless-stopped
 
-  # ─── Voicebox — local ElevenLabs alternative ───
-  # Built from ./voicebox/Dockerfile. Kokoro 82M is bundled on first start
-  # (~313 MB) and voices appear in the TTS dropdown. Voice cloning works via
-  # the Tauri desktop app (not needed for this stack).
+  # ─── Voicebox ───
   voicebox:
-    # Image is built from ./voicebox/Dockerfile on first `docker compose up`.
-    # We pin the tag to `voicebox-voicebox:latest` — the same tag the
-    # standalone ./voicebox/docker-compose.yml uses — so the image is
-    # shared across both compose projects (saves re-downloading Kokoro
-    # + 3 GB of pytorch deps). Remove the `image:` line to force a fresh
-    # build under the root project's name.
     image: voicebox-voicebox:latest
     build: ./voicebox
     pull_policy: never
     container_name: voicebox
     ports:
-      - "127.0.0.1:17493:17493"
+      - "127.0.0.1:${VOICEBOX_PORT:-17493}:17493"
     volumes:
       - ./voicebox/output:/app/data/generations
       - voicebox-data:/app/data
@@ -119,10 +107,6 @@ services:
     environment:
       - LOG_LEVEL=info
       - NUMBA_CACHE_DIR=/tmp/numba_cache
-      # CPU-inference thread tuning — must come from docker-compose (torch
-      # reads these at import time). See voicebox/docker-compose.yml notes.
-      # Value must be ≤ Docker Desktop's VM CPU count (Settings → Resources).
-      # 6 leaves ~2 cores free for whisper/token-server/agent in the same VM.
       - OMP_NUM_THREADS=6
       - MKL_NUM_THREADS=6
       - NUMEXPR_NUM_THREADS=6
@@ -134,54 +118,62 @@ services:
           memory: 6G
     restart: unless-stopped
 
-  # ─── Token server + web UI (FastAPI) ───
-  # This is the main entry point — users open http://localhost:8000 in
-  # their browser. Serves static files from ./web/ and exposes /api/token,
-  # /api/models, /api/tts-sample, /api/fx-rate.
-  #
-  # LIVEKIT_URL is the PUBLIC url we embed in the JWT returned to browsers.
-  # Must point at the port-mapped livekit-server (localhost:7880), not the
-  # docker-internal hostname — the browser can't resolve compose service
-  # names.
-  token-server:
-    build: .
-    image: livekit-ai-voice-agent:latest
-    command: uv run uvicorn src.token_server:app --host 0.0.0.0 --port 8000
-    ports: ["8000:8000"]
+  # ─── Backend (FastAPI; uses host's system-installed PostgreSQL) ───
+  backend:
+    build: ./backend
+    ports: ["${BACKEND_PORT:-8000}:8000"]
     environment:
-      - LIVEKIT_URL=ws://localhost:7880
-      - LIVEKIT_API_KEY=devkey
-      - LIVEKIT_API_SECRET=secret
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@${POSTGRES_HOST:-host.docker.internal}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-voiceagent}
+      - SECRET_KEY=${SECRET_KEY:-dev-secret-key-change-in-production}
+      - FERNET_KEY=${FERNET_KEY:-***REMOVED***}
+      # Internal URL used by the backend itself to mint tokens / connect.
+      - LIVEKIT_URL=ws://livekit-server:7880
+      # Public URL handed back to the browser; defaults to the host port mapped above.
+      - LIVEKIT_PUBLIC_URL=${LIVEKIT_PUBLIC_URL:-ws://localhost:${LIVEKIT_PORT:-7880}}
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-devkey}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-secret}
       - VOICEBOX_URL=http://voicebox:17493
       - OLLAMA_URL=http://host.docker.internal:11434
       - PIPER_URL=http://tts:8000/v1
+      - TTS_BASE_URL=http://tts:8000/v1
+      - WHISPER_TINY_URL=http://whisper-tiny:8000/v1
+      - WHISPER_BASE_URL=http://whisper-base:8000/v1
+      - WHISPER_SMALL_URL=http://whisper-small:8000/v1
+      - WHISPER_BASE_MULTI_URL=http://whisper-base-multi:8000/v1
+      - WHISPER_SMALL_MULTI_URL=http://whisper-small-multi:8000/v1
+      - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
+      - ADMIN_EMAIL=${ADMIN_EMAIL:-***REMOVED***}
+      - ADMIN_PASSWORD=${ADMIN_PASSWORD:-***REMOVED***}
+      - HF_HOME=/root/.cache/huggingface
     env_file:
       - path: .env
         required: false
+    volumes:
+      - livekit-hf-cache:/root/.cache/huggingface
+      - quality-data:/data
     depends_on:
-      - livekit-server
-      - voicebox
-    # Lets the container reach Ollama on the host (Mac/Windows only —
-    # on Linux hosts you'd use --network host or add the host IP manually).
+      livekit-server:
+        condition: service_started
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
-  # ─── Agent worker (LiveKit dispatcher) ───
-  # Joins each room the token server creates, builds the STT/LLM/TTS
-  # pipeline from the browser-chosen config in participant metadata.
-  # LIVEKIT_URL here uses the docker-internal hostname — the agent lives
-  # in the same network and shouldn't round-trip through the host.
+  # ─── Frontend (React/Vite → nginx) ───
+  frontend:
+    build: ./frontend
+    ports: ["${FRONTEND_PORT:-3000}:80"]
+    depends_on:
+      - backend
+    restart: unless-stopped
+
+  # ─── Agent worker ───
   agent:
-    build: .
-    image: livekit-ai-voice-agent:latest
-    command: uv run python src/agent.py start
+    build: ./backend
+    command: uv run python agent.py start
     environment:
-      # LiveKit
       - LIVEKIT_URL=ws://livekit-server:7880
-      - LIVEKIT_API_KEY=devkey
-      - LIVEKIT_API_SECRET=secret
-      # Internal service URLs (docker network)
+      - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-devkey}
+      - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-secret}
       - OLLAMA_URL=http://host.docker.internal:11434
       - VOICEBOX_URL=http://voicebox:17493
       - TTS_BASE_URL=http://tts:8000/v1
@@ -190,35 +182,23 @@ services:
       - WHISPER_SMALL_URL=http://whisper-small:8000/v1
       - WHISPER_BASE_MULTI_URL=http://whisper-base-multi:8000/v1
       - WHISPER_SMALL_MULTI_URL=http://whisper-small-multi:8000/v1
+      - HF_HOME=/root/.cache/huggingface
     env_file:
       - path: .env
         required: false
+    volumes:
+      - livekit-hf-cache:/root/.cache/huggingface
     depends_on:
       - livekit-server
       - whisper-base
-      - whisper-small
-      - whisper-base-multi
-      - whisper-small-multi
       - tts
-      - voicebox
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
-
-  # ─── Ollama (OPTIONAL — enable with `--profile ollama`) ───
-  # Uncomment + use `docker compose --profile ollama up -d` to run Ollama
-  # in Docker instead of on the host. Mounts your existing ~/.ollama dir
-  # so models aren't re-downloaded.
-  #
-  # ollama:
-  #   image: ollama/ollama:latest
-  #   profiles: ["ollama"]
-  #   ports: ["11434:11434"]
-  #   volumes:
-  #     - ~/.ollama:/root/.ollama
-  #   restart: unless-stopped
 
 volumes:
   tts-voices:
   voicebox-data:
   huggingface-cache:
+  livekit-hf-cache:
+  quality-data:

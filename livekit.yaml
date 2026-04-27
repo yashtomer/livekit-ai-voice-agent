@@ -9,12 +9,9 @@ rtc:
   tcp_port: 7881
   udp_port: 7882
   use_external_ip: false
-  # Advertise 127.0.0.1 as the IP for ICE candidates so host browsers can connect
-  nat_1_to_1_ips:
-    - "127.0.0.1"
 
 keys:
-  devkey: secret
+  devkey: 10cffce81aef9143eab37d4acad8960283e0e7a2a8948fe9608440c003d3862a
 
 logging:
   level: info

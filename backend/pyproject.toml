@@ -1,0 +1,52 @@
+[project]
+name = "voice-agent-backend"
+version = "2.0.0"
+requires-python = ">=3.11"
+dependencies = [
+    # FastAPI stack
+    "fastapi>=0.115,<1",
+    "uvicorn[standard]>=0.30,<1",
+    # Database
+    "sqlalchemy[asyncio]>=2.0,<3",
+    "asyncpg>=0.29,<1",
+    "alembic>=1.13,<2",
+    # Auth
+    "pyjwt>=2.8,<3",
+    "bcrypt>=4.0,<5",
+    "cryptography>=42,<45",
+    # Utilities
+    "pydantic[email]>=2.0,<3",
+    "python-dotenv>=1.0,<2",
+    "httpx>=0.27,<1",
+    # LiveKit
+    "livekit>=0.11,<2",
+    "livekit-api>=0.7,<2",
+    "livekit-agents[openai,silero,turn-detector]~=1.3",
+    # TTS plugins
+    "edge-tts>=7.0",
+    # Constraints
+    "numpy<2",
+    "onnxruntime<1.24",
+    "transformers<5",
+]
+
+[project.optional-dependencies]
+cloud = [
+    "livekit-plugins-deepgram>=0.6",
+    "livekit-plugins-anthropic>=0.2",
+    "livekit-plugins-azure>=0.3",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["app"]
+
+[tool.uv]
+constraint-dependencies = [
+    "onnxruntime<1.24",
+    "numpy<2",
+    "transformers<5",
+]
