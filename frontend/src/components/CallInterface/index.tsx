@@ -5,7 +5,16 @@ import api from '../../api/client'
 import { useCallStore } from '../../store/callStore'
 import { useModelStore } from '../../store/modelStore'
 import { useAuthStore } from '../../store/authStore'
+import { useUIStore } from '../../store/uiStore'
 import SetupReadyModal from './SetupReadyModal'
+
+const PROVIDER_LABELS: Record<string, string> = {
+  openai: 'OpenAI',
+  groq: 'Groq',
+  anthropic: 'Anthropic',
+  google: 'Google (Gemini)',
+  deepseek: 'DeepSeek',
+}
 
 function formatTime(seconds: number): string {
   const m = Math.floor(seconds / 60).toString().padStart(2, '0')
@@ -20,6 +29,7 @@ export default function CallInterface() {
   } = useCallStore()
   const { getSelectedConfig, selectedLlm } = useModelStore()
   const { isAdmin } = useAuthStore()
+  const openConfigModal = useUIStore((s) => s.openConfigModal)
 
   const roomRef = useRef<Room | null>(null)
   const audioElementsRef = useRef<HTMLAudioElement[]>([])
@@ -89,6 +99,16 @@ export default function CallInterface() {
     setError(null)
     setErrorDetail(null)
     setShowErrorDetail(false)
+
+    // Pre-flight: paid LLM picked but no API key on file → open the config modal
+    // focused on the right provider instead of letting the backend reject /token.
+    if (selectedLlm?.requires_api_key) {
+      const provider = selectedLlm.provider
+      const label = PROVIDER_LABELS[provider] ?? provider
+      setError(`Add an API key for ${label} to use this model.`)
+      openConfigModal(provider)
+      return
+    }
 
     // Pre-flight: make sure the turn-detector model is ready. If not, show the
     // setup modal and bail — the modal calls back into handleStartCall once ready.
@@ -235,7 +255,7 @@ export default function CallInterface() {
         <div className="bg-destructive/8 border border-destructive/20 rounded-lg px-3 py-2.5 mb-3">
           <div className="flex items-start gap-2 text-destructive text-sm">
             <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />
-            <span className="flex-1">{isAdmin() ? error : 'Failed to start call. Check your configuration.'}</span>
+            <span className="flex-1">{error}</span>
           </div>
           {isAdmin() && errorDetail && errorDetail !== error && (
             <button

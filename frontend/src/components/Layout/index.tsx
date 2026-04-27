@@ -4,6 +4,7 @@ import {
   LayoutDashboard, Shield, Settings, LogOut, ChevronDown, User, Sun, Moon,
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
+import { useUIStore } from '../../store/uiStore'
 import { useTheme } from '../../lib/theme'
 import ConfigModal from '../ConfigModal'
 
@@ -16,7 +17,12 @@ export default function Layout({ children }: LayoutProps) {
   const location = useLocation()
   const { user, logout, isAdmin } = useAuthStore()
   const { theme, toggleTheme } = useTheme()
-  const [showConfigModal, setShowConfigModal] = useState(false)
+  const {
+    configModalOpen,
+    configModalHighlightProvider,
+    openConfigModal,
+    closeConfigModal,
+  } = useUIStore()
   const [showUserMenu, setShowUserMenu] = useState(false)
 
   const handleLogout = () => {
@@ -75,7 +81,7 @@ export default function Layout({ children }: LayoutProps) {
 
             {/* Config */}
             <button
-              onClick={() => setShowConfigModal(true)}
+              onClick={() => openConfigModal()}
               className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg text-sm text-muted-foreground hover:text-foreground hover:bg-muted transition-all"
               title="Configure API Keys"
             >
@@ -109,7 +115,7 @@ export default function Layout({ children }: LayoutProps) {
                       </span>
                     </div>
                     <button
-                      onClick={() => { setShowConfigModal(true); setShowUserMenu(false) }}
+                      onClick={() => { openConfigModal(); setShowUserMenu(false) }}
                       className="w-full flex items-center gap-2.5 px-3 py-2 text-sm text-muted-foreground hover:text-foreground hover:bg-muted transition-colors"
                     >
                       <Settings className="w-3.5 h-3.5" />
@@ -133,7 +139,12 @@ export default function Layout({ children }: LayoutProps) {
       {/* Main */}
       <main className="flex-1">{children}</main>
 
-      {showConfigModal && <ConfigModal onClose={() => setShowConfigModal(false)} />}
+      {configModalOpen && (
+        <ConfigModal
+          onClose={closeConfigModal}
+          highlightProvider={configModalHighlightProvider}
+        />
+      )}
     </div>
   )
 }

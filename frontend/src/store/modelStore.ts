@@ -18,6 +18,7 @@ export interface ModelOption {
   size?: string
   compute_profile?: ComputeProfile
   min_vram_gb?: number | null
+  requires_api_key?: boolean
   [key: string]: unknown
 }
 
@@ -64,8 +65,8 @@ export const useModelStore = create<ModelState>((set, get) => ({
 
     const clean = (m: ModelOption) => {
       // Strip UI-only metadata before sending to backend.
-      const { label, price_per_hour, compute_profile, min_vram_gb, ...rest } = m
-      void label; void price_per_hour; void compute_profile; void min_vram_gb
+      const { label, price_per_hour, compute_profile, min_vram_gb, requires_api_key, ...rest } = m
+      void label; void price_per_hour; void compute_profile; void min_vram_gb; void requires_api_key
       return rest
     }
 

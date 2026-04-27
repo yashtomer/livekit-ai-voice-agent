@@ -89,7 +89,15 @@ async def list_models(
     db_models = result.scalars().all()
 
     stt = [_model_to_dict(m) for m in db_models if m.model_type == "stt" and m.provider in available]
-    llm = [_model_to_dict(m) for m in db_models if m.model_type == "llm" and m.provider in available]
+    # LLMs are always returned in full so customers can see paid options. The
+    # frontend uses requires_api_key to decide whether to gate the "Start Call"
+    # button and prompt the user to add a key. Ollama entries are excluded here
+    # because they're appended below via a live /api/tags fetch — the sync job
+    # also persists them to the DB, which would otherwise produce duplicates.
+    llm = [
+        {**_model_to_dict(m), "requires_api_key": m.provider not in available}
+        for m in db_models if m.model_type == "llm" and m.provider != "ollama"
+    ]
     tts = [_model_to_dict(m) for m in db_models if m.model_type == "tts" and m.provider in available]
 
     ollama_models = []
@@ -113,6 +121,7 @@ async def list_models(
                     "price_per_hour": 0.0,
                     "compute_profile": profile,
                     "min_vram_gb": vram,
+                    "requires_api_key": False,
                 })
     except Exception as e:
         ollama_error = str(e)

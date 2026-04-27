@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { X, Key, Check, Trash2, Eye, EyeOff, AlertCircle, Loader, Shield } from 'lucide-react'
 import api from '../../api/client'
 
@@ -26,9 +26,12 @@ const PROVIDER_HINTS: Record<string, string> = {
   azure: 'Speech service key',
 }
 
-interface ConfigModalProps { onClose: () => void }
+interface ConfigModalProps {
+  onClose: () => void
+  highlightProvider?: string | null
+}
 
-export default function ConfigModal({ onClose }: ConfigModalProps) {
+export default function ConfigModal({ onClose, highlightProvider }: ConfigModalProps) {
   const [keys, setKeys] = useState<APIKeyInfo[]>([])
   const [loading, setLoading] = useState(true)
   const [editing, setEditing] = useState<string | null>(null)
@@ -37,10 +40,26 @@ export default function ConfigModal({ onClose }: ConfigModalProps) {
   const [saving, setSaving] = useState<string | null>(null)
   const [deleting, setDeleting] = useState<string | null>(null)
   const [feedback, setFeedback] = useState<Record<string, string>>({})
+  const cardRefs = useRef<Record<string, HTMLDivElement | null>>({})
 
   useEffect(() => {
     api.get('/config/keys').then((r) => setKeys(r.data)).catch(() => {}).finally(() => setLoading(false))
   }, [])
+
+  // When opened with a target provider (e.g. user picked a paid LLM without a
+  // key), expand its card, scroll it into view, and focus the input.
+  useEffect(() => {
+    if (!highlightProvider || loading) return
+    if (!keys.some((k) => k.provider === highlightProvider)) return
+    setEditing(highlightProvider)
+    const id = window.setTimeout(() => {
+      cardRefs.current[highlightProvider]?.scrollIntoView({
+        behavior: 'smooth',
+        block: 'center',
+      })
+    }, 50)
+    return () => window.clearTimeout(id)
+  }, [highlightProvider, loading, keys])
 
   const handleSave = async (provider: string) => {
     const key = inputValues[provider]?.trim()
@@ -111,7 +130,15 @@ export default function ConfigModal({ onClose }: ConfigModalProps) {
           ) : (
             <div className="space-y-2">
               {keys.map(({ provider, configured }) => (
-                <div key={provider} className="bg-muted rounded-xl border border-border p-3">
+                <div
+                  key={provider}
+                  ref={(el) => { cardRefs.current[provider] = el }}
+                  className={`bg-muted rounded-xl border p-3 transition-all ${
+                    highlightProvider === provider
+                      ? 'border-primary ring-2 ring-primary/30'
+                      : 'border-border'
+                  }`}
+                >
                   <div className="flex items-center justify-between">
                     <div className="flex items-center gap-2">
                       <span className="text-sm font-semibold text-foreground">{PROVIDER_LABELS[provider] ?? provider}</span>

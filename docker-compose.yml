@@ -92,8 +92,9 @@ services:
       - tts-voices:/app/voices
     restart: unless-stopped
 
-  # ─── Voicebox ───
+  # ─── Voicebox (optional — enable with `--profile voicebox`) ───
   voicebox:
+    profiles: ["voicebox"]
     image: voicebox-voicebox:latest
     build: ./voicebox
     pull_policy: never

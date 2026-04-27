@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Loader, AlertCircle, TrendingUp, ChevronRight, ChevronDown, Check } from 'lucide-react'
+import { Loader, AlertCircle, TrendingUp, ChevronRight, ChevronDown, Check, Lock } from 'lucide-react'
 import Layout from '../components/Layout'
 import CostEstimator from '../components/CostEstimator'
 import CallInterface from '../components/CallInterface'
@@ -92,6 +92,14 @@ function ModelSelect({
               {isFreeSelected ? 'FREE' : `$${selected.price_per_hour.toFixed(3)}/hr`}
             </span>
           )}
+          {selected?.requires_api_key && (
+            <span
+              className="flex-shrink-0 flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-destructive/10 text-destructive"
+              title="API key required"
+            >
+              <Lock className="w-2.5 h-2.5" /> Key
+            </span>
+          )}
         </div>
         <ChevronDown className={`w-3.5 h-3.5 flex-shrink-0 text-muted-foreground transition-transform duration-150 ${open ? 'rotate-180' : ''}`} />
       </button>
@@ -124,6 +132,14 @@ function ModelSelect({
                     }`}>
                       {isFree ? 'FREE' : `$${opt.price_per_hour.toFixed(3)}/hr`}
                     </span>
+                    {opt.requires_api_key && (
+                      <span
+                        className="flex items-center gap-1 text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-destructive/10 text-destructive"
+                        title="API key required"
+                      >
+                        <Lock className="w-2.5 h-2.5" /> Key
+                      </span>
+                    )}
                     {isSelected && <Check className="w-3 h-3 text-primary flex-shrink-0" />}
                   </div>
                 </div>
