@@ -85,7 +85,10 @@ async def create_token(
     # Quota enforcement (admins exempt). `ended_at` isn't reliably set today,
     # so "active" = started within the last call_limit window.
     if user.role != UserRole.admin:
-        now = datetime.now(timezone.utc)
+        # CallSession.started_at is TIMESTAMP WITHOUT TIME ZONE (naive UTC,
+        # written by Postgres `func.now()` in a UTC container). Compare with
+        # naive UTC values or asyncpg raises a DataError on the cast.
+        now = datetime.now(timezone.utc).replace(tzinfo=None)
         active_window_start = now - timedelta(seconds=call_limit_s + 30)
         today_start = now.replace(hour=0, minute=0, second=0, microsecond=0)
 
