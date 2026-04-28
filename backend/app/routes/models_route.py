@@ -105,8 +105,12 @@ async def list_models(
     try:
         async with httpx.AsyncClient(timeout=3.0) as c:
             r = await c.get(f"{OLLAMA_URL}/api/tags")
+            seen_names = set()
             for m in r.json().get("models", []):
                 name = m["name"]
+                if name in seen_names:
+                    continue
+                seen_names.add(name)
                 size_gb = round(m.get("size", 0) / 1e9, 2)
                 base = name.split(":")[0].split("/")[-1].lower()
                 company = next(

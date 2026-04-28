@@ -38,7 +38,20 @@ async def _resolve_api_key(provider: str, user: User, db: AsyncSession) -> str |
     )
     key_row = result.scalar_one_or_none()
     if key_row:
-        return decrypt_key(key_row.encrypted_key)
+        try:
+            return decrypt_key(key_row.encrypted_key)
+        except Exception:
+            # Most likely the FERNET_KEY rotated since the key was saved.
+            # Surface as a 400 so the user knows to re-enter rather than
+            # bubbling an opaque 500.
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Saved API key for '{provider}' could not be decrypted "
+                    "(server encryption key may have changed). Re-enter it via "
+                    "the configuration panel."
+                ),
+            )
 
     if user.role == UserRole.admin:
         env_var = ENV_KEY_MAP.get(provider)

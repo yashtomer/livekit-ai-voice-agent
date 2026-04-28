@@ -157,9 +157,11 @@ export default function CallInterface() {
 
       setErrorDetail(fullDetail)
       setShowErrorDetail(false)
-      // 429 (quota) gets a user-facing message even for non-admins — they need
-      // to know it's a quota, not a bad config.
-      if (status === 429 && apiDetail) {
+      // Backend 4xx detail messages are user-facing and actionable
+      // ("No API key configured for provider 'X'", quota messages, etc.) —
+      // surface them to customers too. 5xx and network errors stay masked
+      // since they expose internals.
+      if (status && status >= 400 && status < 500 && apiDetail) {
         setError(apiDetail)
       } else {
         setError(isAdmin() ? fullDetail : 'Failed to start call. Check your configuration.')
