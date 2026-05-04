@@ -46,3 +46,15 @@ CORS_ORIGINS: list[str] = os.environ.get(
 ADMIN_EMAIL: str = os.environ.get("ADMIN_EMAIL", "***REMOVED***")
 ADMIN_PASSWORD: str = os.environ.get("ADMIN_PASSWORD", "***REMOVED***")
 JWT_EXPIRY_HOURS: int = int(os.environ.get("JWT_EXPIRY_HOURS", "24"))
+
+# Shared secret used by the agent to fetch per-room config (including the
+# user's API keys) over the internal HTTP channel. Keys never enter the
+# LiveKit JWT or the browser; the agent reads them server-to-server.
+INTERNAL_AGENT_SECRET: str = os.environ.get(
+    "INTERNAL_AGENT_SECRET", "dev-internal-agent-secret-change-in-production"
+)
+# How long the room-config cache entry lives before being evicted. Entries
+# are also evicted on first read (single-use), so this is just the upper
+# bound for an unclaimed room (e.g. user clicked Start Call but never
+# connected).
+ROOM_CONFIG_TTL_SECONDS: int = int(os.environ.get("ROOM_CONFIG_TTL_SECONDS", "300"))

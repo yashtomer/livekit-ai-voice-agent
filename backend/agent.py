@@ -40,6 +40,14 @@ OLLAMA_NATIVE_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_BASE_URL = f"{OLLAMA_NATIVE_URL.rstrip('/')}/v1"
 TTS_BASE_URL = os.environ.get("TTS_BASE_URL", "http://localhost:8200/v1")
 
+# Backend internal channel — agent fetches per-room API keys from here over
+# server-to-server HTTP so secrets never travel through the LiveKit JWT or
+# the browser. Optional: when unset (e.g. native dev runs) the agent falls
+# back to whatever's in participant metadata, which only contains keys for
+# free providers.
+BACKEND_INTERNAL_URL = os.environ.get("BACKEND_INTERNAL_URL", "").rstrip("/")
+INTERNAL_AGENT_SECRET = os.environ.get("INTERNAL_AGENT_SECRET", "")
+
 # Whisper containers — one per model size.
 # The `.en` models are English-only and ~30% faster on CPU. The "-multi"
 # variants use the multilingual Whisper and are required for any non-English
@@ -585,12 +593,7 @@ def build_stt(cfg: dict, language: str = "en"):
         )
 
     if provider == "deepgram":
-        try:
-            from livekit.plugins import deepgram as deepgram_plugin
-        except ImportError:
-            raise RuntimeError(
-                "livekit-plugins-deepgram not installed. Run `uv sync --extra cloud`."
-            )
+        from livekit.plugins import deepgram as deepgram_plugin
         api_key = cfg.get("api_key") or os.environ.get("DEEPGRAM_API_KEY")
         if not api_key:
             raise RuntimeError("DEEPGRAM_API_KEY not configured")
@@ -633,12 +636,7 @@ def build_llm(cfg: dict):
         )
 
     if provider == "anthropic":
-        try:
-            from livekit.plugins import anthropic as anthropic_plugin
-        except ImportError:
-            raise RuntimeError(
-                "livekit-plugins-anthropic not installed. Run `uv sync --extra cloud`."
-            )
+        from livekit.plugins import anthropic as anthropic_plugin
         api_key = cfg.get("api_key") or os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             raise RuntimeError("ANTHROPIC_API_KEY not configured")
@@ -743,12 +741,7 @@ def build_tts(cfg: dict):
         )
 
     if provider == "azure":
-        try:
-            from livekit.plugins import azure as azure_plugin
-        except ImportError:
-            raise RuntimeError(
-                "livekit-plugins-azure not installed. Run `uv sync --extra cloud`."
-            )
+        from livekit.plugins import azure as azure_plugin
         api_key = cfg.get("api_key") or os.environ.get("AZURE_SPEECH_KEY")
         region = cfg.get("azure_region") or os.environ.get("AZURE_SPEECH_REGION", "eastus")
         if not api_key:
@@ -793,13 +786,69 @@ async def _send_to_browser(ctx: JobContext, data: dict):
         logger.debug(f"Failed to send data to browser: {e}")
 
 
+async def _fetch_room_secrets(room_name: str) -> dict | None:
+    """Fetch the full per-room config (with api_keys) from the backend over
+    a server-to-server channel. Returns None when not configured or on
+    failure — callers fall back to whatever's in participant metadata.
+    """
+    if not BACKEND_INTERNAL_URL or not INTERNAL_AGENT_SECRET:
+        return None
+    url = f"{BACKEND_INTERNAL_URL}/internal/room-config/{room_name}"
+    try:
+        async with httpx.AsyncClient(timeout=httpx.Timeout(5.0)) as client:
+            resp = await client.get(
+                url, headers={"X-Internal-Secret": INTERNAL_AGENT_SECRET}
+            )
+        if resp.status_code == 404:
+            logger.warning(
+                f"backend has no cached config for room {room_name} "
+                "(already consumed or expired) — falling back to JWT metadata"
+            )
+            return None
+        if resp.status_code == 401:
+            logger.error(
+                "backend rejected internal secret — check INTERNAL_AGENT_SECRET "
+                "matches between backend and agent"
+            )
+            return None
+        resp.raise_for_status()
+        return resp.json()
+    except Exception as e:
+        logger.error(f"failed to fetch room config from backend: {e}")
+        return None
+
+
+def _merge_secrets(public_cfg: dict, secret_cfg: dict | None) -> dict:
+    """Overlay api_key / azure_region from the server-side bundle onto the
+    public config from JWT metadata. Public fields stay authoritative — the
+    browser already validated the model selection."""
+    if not secret_cfg:
+        return public_cfg
+    merged = {k: dict(v) for k, v in public_cfg.items()}
+    for stage in ("stt", "llm", "tts"):
+        secret_stage = secret_cfg.get(stage) or {}
+        for field in ("api_key", "azure_region"):
+            if field in secret_stage:
+                merged.setdefault(stage, {})[field] = secret_stage[field]
+    return merged
+
+
 async def entrypoint(ctx: JobContext):
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
 
     # Wait for the browser participant so we can read their metadata
     participant = await ctx.wait_for_participant()
-    cfg = _parse_config(participant.metadata)
-    logger.info(f"Starting session with config: {cfg}")
+    public_cfg = _parse_config(participant.metadata)
+    # Pull api_keys (and other secret fields) from the backend over a
+    # server-to-server channel keyed by room name. This is the only path
+    # by which secrets reach the agent — they are never embedded in the
+    # JWT or the browser-visible metadata.
+    secret_cfg = await _fetch_room_secrets(ctx.room.name)
+    cfg = _merge_secrets(public_cfg, secret_cfg)
+    logger.info(
+        f"Starting session — providers: stt={cfg['stt'].get('provider')} "
+        f"llm={cfg['llm'].get('provider')} tts={cfg['tts'].get('provider')}"
+    )
 
     # ─── Derive conversation language ───
     # The TTS voice carries the authoritative language. For Voicebox profiles

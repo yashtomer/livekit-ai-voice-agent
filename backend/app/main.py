@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
@@ -10,8 +11,8 @@ from .db import engine, SessionLocal, Base
 from .models import User, UserRole, UserAPIKey, ModelEntry, CallSession, AdminSetting
 from .services.auth import hash_password
 from .seed_data import SEED_MODELS, compute_profile_for
-from .routes import auth, models_route, token_route, admin_route, config_routes, tts_route, fx_route, setup_route
-from .services import model_setup
+from .routes import auth, models_route, token_route, admin_route, config_routes, tts_route, fx_route, setup_route, internal_route
+from .services import model_setup, room_config_cache
 
 from .log_buffer import install as _install_log_buffer
 
@@ -168,8 +169,16 @@ async def lifespan(app: FastAPI):
     # Make sure the LiveKit turn-detector model is available; download in
     # background if missing so the API stays responsive.
     await model_setup.ensure_downloaded_in_background()
-    yield
-    await engine.dispose()
+    sweeper_task = asyncio.create_task(room_config_cache.run_sweeper())
+    try:
+        yield
+    finally:
+        sweeper_task.cancel()
+        try:
+            await sweeper_task
+        except (asyncio.CancelledError, Exception):
+            pass
+        await engine.dispose()
 
 
 app = FastAPI(title="AI Voice Cost Calculator", version="2.0.0", lifespan=lifespan)
@@ -190,6 +199,9 @@ app.include_router(config_routes.router, prefix="/api/config", tags=["config"])
 app.include_router(tts_route.router,     prefix="/api",        tags=["tts"])
 app.include_router(fx_route.router,      prefix="/api",        tags=["fx"])
 app.include_router(setup_route.router,   prefix="/api/setup",  tags=["setup"])
+# Internal endpoints — agent worker only, NOT for browser use.
+# Protected by X-Internal-Secret header inside the route.
+app.include_router(internal_route.router, prefix="/internal", tags=["internal"])
 
 
 @app.get("/health")

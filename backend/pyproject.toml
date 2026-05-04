@@ -22,19 +22,17 @@ dependencies = [
     "livekit>=0.11,<2",
     "livekit-api>=0.7,<2",
     "livekit-agents[openai,silero,turn-detector]~=1.3",
+    # Cloud LLM/STT/TTS plugins (formerly the `cloud` extra). Bundled by default
+    # so Anthropic / Deepgram / Azure work out of the box without --extra cloud.
+    "livekit-plugins-deepgram>=0.6",
+    "livekit-plugins-anthropic>=0.2",
+    "livekit-plugins-azure>=0.3",
     # TTS plugins
     "edge-tts>=7.0",
     # Constraints
     "numpy<2",
     "onnxruntime<1.24",
     "transformers<5",
-]
-
-[project.optional-dependencies]
-cloud = [
-    "livekit-plugins-deepgram>=0.6",
-    "livekit-plugins-anthropic>=0.2",
-    "livekit-plugins-azure>=0.3",
 ]
 
 [build-system]

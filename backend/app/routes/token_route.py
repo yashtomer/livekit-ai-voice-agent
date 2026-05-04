@@ -137,7 +137,7 @@ async def create_token(
         tts.setdefault("azure_region", os.environ.get("AZURE_SPEECH_REGION", "eastus"))
 
     try:
-        token, url, room_name, identity = build_token(user.id, stt, llm, tts, call_limit_s)
+        token, url, room_name, identity = await build_token(user.id, stt, llm, tts, call_limit_s)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Token generation failed: {e}")
 

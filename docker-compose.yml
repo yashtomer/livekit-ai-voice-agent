@@ -127,6 +127,7 @@ services:
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@${POSTGRES_HOST:-host.docker.internal}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-voiceagent}
       - SECRET_KEY=${SECRET_KEY:-dev-secret-key-change-in-production}
       - FERNET_KEY=${FERNET_KEY:-***REMOVED***}
+      - INTERNAL_AGENT_SECRET=${INTERNAL_AGENT_SECRET:-dev-internal-agent-secret-change-in-production}
       # Internal URL used by the backend itself to mint tokens / connect.
       - LIVEKIT_URL=ws://livekit-server:7880
       # Public URL handed back to the browser; defaults to the host port mapped above.
@@ -175,6 +176,10 @@ services:
       - LIVEKIT_URL=ws://livekit-server:7880
       - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-devkey}
       - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-secret}
+      # Server-to-server channel for fetching per-room API keys from the
+      # backend so they never travel through the browser/JWT.
+      - BACKEND_INTERNAL_URL=http://backend:8000
+      - INTERNAL_AGENT_SECRET=${INTERNAL_AGENT_SECRET:-dev-internal-agent-secret-change-in-production}
       - OLLAMA_URL=http://host.docker.internal:11434
       - VOICEBOX_URL=http://voicebox:17493
       - TTS_BASE_URL=http://tts:8000/v1
@@ -193,6 +198,7 @@ services:
       - livekit-server
       - whisper-base
       - tts
+      - backend
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
