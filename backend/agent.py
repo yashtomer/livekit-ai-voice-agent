@@ -951,14 +951,58 @@ async def entrypoint(ctx: JobContext):
         raw = str(ev)
         logger.error(f"Session error: {raw}")
 
+        # Identify which stage failed (used by several branches below).
+        if "llm_error" in raw or "LLMError" in raw:
+            stage_provider = llm_provider or "LLM provider"
+            stage_label = "Language Model"
+        elif "tts_error" in raw or "TTSError" in raw:
+            stage_provider = tts_provider or "TTS provider"
+            stage_label = "Text-to-Speech"
+        elif "stt_error" in raw or "STTError" in raw:
+            stage_provider = stt_provider or "STT provider"
+            stage_label = "Speech-to-Text"
+        else:
+            stage_provider = ""
+            stage_label = ""
+
+        raw_lower = raw.lower()
+        is_rate_limited = (
+            "429" in raw
+            or "rate_limit" in raw_lower
+            or "rate limit" in raw_lower
+            or "ratelimit" in raw_lower
+            or "insufficient_quota" in raw_lower
+            or "quota_exceeded" in raw_lower
+            or "quota exceeded" in raw_lower
+            or "exceeded your current quota" in raw_lower
+            or "credit balance" in raw_lower    # Anthropic
+            or "billing" in raw_lower and "limit" in raw_lower
+        )
+
         # Extract a clean user-friendly message
         msg = "Unknown error"
         if "terms acceptance" in raw or "model_terms_required" in raw:
             msg = f"Groq TTS failed: model requires terms acceptance. Accept at console.groq.com/playground, or switch to {_tts_alt_hint()}."
         elif "decommissioned" in raw:
             msg = "Model has been decommissioned by the provider. Please select a different model."
-        elif "API key" in raw or "api_key" in raw or "401" in raw:
-            msg = "Invalid or missing API key. Check your .env configuration."
+        elif is_rate_limited:
+            who = stage_provider or "API"
+            stage_part = f" ({stage_label.lower()})" if stage_label else ""
+            if "credit balance" in raw_lower:
+                msg = (
+                    f"{who} credit balance is too low{stage_part}. "
+                    "Top up your account or switch to a local model "
+                    "(Ollama / Whisper / Piper)."
+                )
+            else:
+                msg = (
+                    f"{who} rate limit or quota exceeded{stage_part}. "
+                    "Wait a minute and retry, switch to a different provider, "
+                    "or use a local model (Ollama / Whisper / Piper)."
+                )
+        elif "API key" in raw or "api_key" in raw or "401" in raw or "invalid_api_key" in raw_lower:
+            who = stage_provider or "provider"
+            msg = f"Invalid or missing {who} API key. Check your .env or admin panel configuration."
         elif "tts_error" in raw or "TTSError" in raw:
             # Edge TTS specifically fails with NoAudioReceived when Microsoft's
             # free service throttles. Voicebox/Piper need their containers up.
