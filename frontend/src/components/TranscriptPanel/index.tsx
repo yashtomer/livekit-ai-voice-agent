@@ -4,10 +4,12 @@ import { useCallStore, Message } from '../../store/callStore'
 
 export default function TranscriptPanel() {
   const { messages, clearConversation } = useCallStore()
-  const bottomRef = useRef<HTMLDivElement>(null)
+  const scrollRef = useRef<HTMLDivElement>(null)
 
   useEffect(() => {
-    bottomRef.current?.scrollIntoView({ behavior: 'smooth' })
+    if (messages.length === 0) return
+    const c = scrollRef.current
+    if (c) c.scrollTop = c.scrollHeight
   }, [messages.length])
 
   return (
@@ -27,7 +29,7 @@ export default function TranscriptPanel() {
         )}
       </div>
 
-      <div className={`flex-1 pr-1 space-y-3 ${messages.length === 0 ? 'overflow-hidden' : 'overflow-y-auto'}`}>
+      <div ref={scrollRef} className={`flex-1 pr-1 space-y-3 ${messages.length === 0 ? 'overflow-hidden' : 'overflow-y-auto'}`}>
         {messages.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-center select-none gap-2">
             <div className="w-10 h-10 rounded-2xl bg-muted border border-border flex items-center justify-center">
@@ -59,7 +61,6 @@ export default function TranscriptPanel() {
             </div>
           ))
         )}
-        <div ref={bottomRef} />
       </div>
     </div>
   )
