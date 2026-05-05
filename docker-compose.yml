@@ -10,7 +10,6 @@
 # host.docker.internal:5432 with user `postgres` / password `password`.
 #
 # Services:
-#   - livekit-server (:7880)    — WebRTC media server
 #   - whisper-*      (:8100-8104) — Whisper STT variants
 #   - tts (Piper)    (:8200)    — free local TTS
 #   - voicebox       (:17493)   — local ElevenLabs alternative
@@ -22,18 +21,6 @@
 # ════════════════════════════════════════════════════════════════════
 
 services:
-
-  # ─── LiveKit WebRTC media server ───
-  livekit-server:
-    image: livekit/livekit-server:latest
-    command: --config /etc/livekit.yaml --node-ip 127.0.0.1
-    volumes:
-      - ./livekit.yaml:/etc/livekit.yaml:ro
-    ports:
-      - "${LIVEKIT_PORT:-7880}:7880"
-      - "${LIVEKIT_RTC_PORT:-7881}:7881"
-      - "${LIVEKIT_UDP_PORT:-7882}:7882/udp"
-    restart: unless-stopped
 
   # ─── Whisper STT containers ───
   whisper-base:
@@ -128,10 +115,12 @@ services:
       - SECRET_KEY=${SECRET_KEY:-dev-secret-key-change-in-production}
       - FERNET_KEY=${FERNET_KEY:-***REMOVED***}
       - INTERNAL_AGENT_SECRET=${INTERNAL_AGENT_SECRET:-dev-internal-agent-secret-change-in-production}
-      # Internal URL used by the backend itself to mint tokens / connect.
-      - LIVEKIT_URL=ws://livekit-server:7880
-      # Public URL handed back to the browser; defaults to the host port mapped above.
-      - LIVEKIT_PUBLIC_URL=${LIVEKIT_PUBLIC_URL:-ws://localhost:${LIVEKIT_PORT:-7880}}
+      # Internal URL: shared LiveKit running on the host (see ~/infra/livekit/).
+      # host.docker.internal resolves to the Docker host via host-gateway below.
+      - LIVEKIT_URL=${LIVEKIT_URL:-ws://host.docker.internal:7880}
+      # Public URL handed back to the browser. In production this is the
+      # WSS endpoint Apache proxies (e.g. wss://livekit.aeologic.in).
+      - LIVEKIT_PUBLIC_URL=${LIVEKIT_PUBLIC_URL:-ws://localhost:7880}
       - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-devkey}
       - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-secret}
       - VOICEBOX_URL=http://voicebox:17493
@@ -153,9 +142,6 @@ services:
     volumes:
       - livekit-hf-cache:/root/.cache/huggingface
       - quality-data:/data
-    depends_on:
-      livekit-server:
-        condition: service_started
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -173,7 +159,7 @@ services:
     build: ./backend
     command: uv run python agent.py start
     environment:
-      - LIVEKIT_URL=ws://livekit-server:7880
+      - LIVEKIT_URL=${LIVEKIT_URL:-ws://host.docker.internal:7880}
       - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-devkey}
       - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-secret}
       # Server-to-server channel for fetching per-room API keys from the
@@ -195,7 +181,6 @@ services:
     volumes:
       - livekit-hf-cache:/root/.cache/huggingface
     depends_on:
-      - livekit-server
       - whisper-base
       - tts
       - backend
