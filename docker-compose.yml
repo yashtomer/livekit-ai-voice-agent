@@ -117,7 +117,7 @@ services:
       - INTERNAL_AGENT_SECRET=${INTERNAL_AGENT_SECRET:-dev-internal-agent-secret-change-in-production}
       # Internal URL: shared LiveKit running on the host (see ~/infra/livekit/).
       # host.docker.internal resolves to the Docker host via host-gateway below.
-      - LIVEKIT_URL=${LIVEKIT_URL:-ws://host.docker.internal:7880}
+      - LIVEKIT_URL=${LIVEKIT_URL:-ws://livekit:7880}
       # Public URL handed back to the browser. In production this is the
       # WSS endpoint Apache proxies (e.g. wss://livekit.aeologic.in).
       - LIVEKIT_PUBLIC_URL=${LIVEKIT_PUBLIC_URL:-ws://localhost:7880}
@@ -142,6 +142,9 @@ services:
     volumes:
       - livekit-hf-cache:/root/.cache/huggingface
       - quality-data:/data
+    networks:
+      - default
+      - voice-shared
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
@@ -159,7 +162,7 @@ services:
     build: ./backend
     command: uv run python agent.py start
     environment:
-      - LIVEKIT_URL=${LIVEKIT_URL:-ws://host.docker.internal:7880}
+      - LIVEKIT_URL=${LIVEKIT_URL:-ws://livekit:7880}
       - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-devkey}
       - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-secret}
       # Server-to-server channel for fetching per-room API keys from the
@@ -180,6 +183,9 @@ services:
         required: false
     volumes:
       - livekit-hf-cache:/root/.cache/huggingface
+    networks:
+      - default
+      - voice-shared
     depends_on:
       - whisper-base
       - tts
@@ -194,3 +200,8 @@ volumes:
   huggingface-cache:
   livekit-hf-cache:
   quality-data:
+
+networks:
+  default:
+  voice-shared:
+    external: true
