@@ -10,22 +10,25 @@
 # host.docker.internal:5432 with user `postgres` / password `password`.
 #
 # Services:
-#   - whisper-*      (:8100-8104) — Whisper STT variants
-#   - tts (Piper)    (:8200)    — free local TTS
-#   - voicebox       (:17493)   — local ElevenLabs alternative
-#   - backend        (:8000)    — FastAPI backend (MAIN ENTRY POINT)
-#   - frontend       (:3000)    — React/Vite UI
-#   - agent                     — LiveKit worker
+#   - whisper-*      — Whisper STT variants (internal only, no host port)
+#   - tts (Piper)    — free local TTS (internal only, no host port)
+#   - voicebox       (:17493) — local ElevenLabs alternative
+#   - backend        (:8000)  — FastAPI backend (MAIN ENTRY POINT)
+#   - frontend       (:3000)  — React/Vite UI
+#   - agent                   — LiveKit worker
 #
-# All host-facing ports are env-configurable — see .env.example.
+# Host-facing ports bind to 127.0.0.1 only — Apache fronts them for HTTPS.
+# Whisper/TTS/voicebox stay on the docker network; the backend reaches
+# them by service name. Override host ports via .env if needed.
 # ════════════════════════════════════════════════════════════════════
+
+name: ai-voice-cost-calc
 
 services:
 
   # ─── Whisper STT containers ───
   whisper-base:
     image: fedirz/faster-whisper-server:latest-cpu
-    ports: ["${WHISPER_BASE_PORT:-8100}:8000"]
     environment:
       - WHISPER__MODEL=Systran/faster-whisper-base.en
       - WHISPER__COMPUTE_TYPE=int8
@@ -35,7 +38,6 @@ services:
 
   whisper-small:
     image: fedirz/faster-whisper-server:latest-cpu
-    ports: ["${WHISPER_SMALL_PORT:-8101}:8000"]
     environment:
       - WHISPER__MODEL=Systran/faster-whisper-small.en
       - WHISPER__COMPUTE_TYPE=int8
@@ -45,7 +47,6 @@ services:
 
   whisper-tiny:
     image: fedirz/faster-whisper-server:latest-cpu
-    ports: ["${WHISPER_TINY_PORT:-8102}:8000"]
     environment:
       - WHISPER__MODEL=Systran/faster-whisper-tiny.en
       - WHISPER__COMPUTE_TYPE=int8
@@ -55,7 +56,6 @@ services:
 
   whisper-base-multi:
     image: fedirz/faster-whisper-server:latest-cpu
-    ports: ["${WHISPER_BASE_MULTI_PORT:-8103}:8000"]
     environment:
       - WHISPER__MODEL=Systran/faster-whisper-base
       - WHISPER__COMPUTE_TYPE=int8
@@ -64,7 +64,6 @@ services:
 
   whisper-small-multi:
     image: fedirz/faster-whisper-server:latest-cpu
-    ports: ["${WHISPER_SMALL_MULTI_PORT:-8104}:8000"]
     environment:
       - WHISPER__MODEL=Systran/faster-whisper-small
       - WHISPER__COMPUTE_TYPE=int8
@@ -74,7 +73,6 @@ services:
   # ─── Piper TTS ───
   tts:
     image: ghcr.io/matatonic/openedai-speech:latest
-    ports: ["${TTS_PORT:-8200}:8000"]
     volumes:
       - tts-voices:/app/voices
     restart: unless-stopped
@@ -87,7 +85,7 @@ services:
     pull_policy: never
     container_name: voicebox
     ports:
-      - "127.0.0.1:${VOICEBOX_PORT:-17493}:17493"
+      - "${HOST_BIND:-127.0.0.1}:${VOICEBOX_PORT:-17493}:17493"
     volumes:
       - ./voicebox/output:/app/data/generations
       - voicebox-data:/app/data
@@ -109,7 +107,7 @@ services:
   # ─── Backend (FastAPI; uses host's system-installed PostgreSQL) ───
   backend:
     build: ./backend
-    ports: ["${BACKEND_PORT:-8000}:8000"]
+    ports: ["${HOST_BIND:-127.0.0.1}:${BACKEND_PORT:-8000}:8000"]
     environment:
       - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@${POSTGRES_HOST:-host.docker.internal}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-voiceagent}
       - SECRET_KEY=${SECRET_KEY:-dev-secret-key-change-in-production}
@@ -152,7 +150,7 @@ services:
   # ─── Frontend (React/Vite → nginx) ───
   frontend:
     build: ./frontend
-    ports: ["${FRONTEND_PORT:-3000}:80"]
+    ports: ["${HOST_BIND:-127.0.0.1}:${FRONTEND_PORT:-3000}:80"]
     depends_on:
       - backend
     restart: unless-stopped
