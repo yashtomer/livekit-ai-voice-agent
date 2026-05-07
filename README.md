@@ -39,25 +39,35 @@ Host
   │
   ├─ PostgreSQL (system-installed) ◄────── DATABASE_URL via host.docker.internal
   │
-  └─ Docker Compose
+  ├─ Shared LiveKit (~/infra/livekit/)
+  │    └─ joins external docker network: voice-shared
+  │       WS 7880 · TCP 7881 · UDP 7882 → direct to host
+  │
+  └─ Docker Compose  (project: ai-voice-cost-calc)
        │
-       ├─ Browser ─► React / Vite (port 3000) ─── WebRTC ─► LiveKit Server (7880)
-       │                                                          │
-       │                  REST / JWT ─► FastAPI (port 8000)       │
-       │                                       │             Agent Worker
-       │                                       └─ Token endpoint │
-       │                                                          │
-       └─ Whisper (8100-8104) · Piper (8200) · Voicebox (17493)  │
-                                                              ┌────┴─────┐
-                                                              STT → LLM → TTS
+       ├─ Browser ─► frontend (nginx, ${FRONTEND_PORT}) ──► HTTPS via Apache
+       │
+       ├─ REST/JWT ─► backend (FastAPI, ${BACKEND_PORT}) ─► PostgreSQL (host)
+       │                       │
+       │                       └─ joins voice-shared ──► livekit:7880
+       │
+       ├─ agent worker ─ joins voice-shared ─► livekit:7880
+       │                                       │
+       │                                       └─► STT/LLM/TTS containers (internal only)
+       │
+       └─ whisper-{tiny,base,small,base-multi,small-multi} · tts (Piper) · voicebox
+            ▲ no host ports — reached over the docker network by service name
 ```
 
 **Call flow:**
 1. Browser requests a token from the FastAPI backend (selected model config embedded in metadata).
-2. Agent worker picks up the room, reads metadata, and builds the STT → LLM → TTS pipeline.
-3. Real-time transcript + per-stage latency metrics are sent back to the browser via LiveKit data messages.
+2. Backend signs a token whose URL is `LIVEKIT_PUBLIC_URL` (the WSS Apache exposes); browser connects there.
+3. Agent worker picks up the room (signaling over `LIVEKIT_URL=ws://livekit:7880` on the shared docker network), reads metadata, and builds the STT → LLM → TTS pipeline.
+4. Real-time transcript + per-stage latency metrics are sent back to the browser via LiveKit data messages.
 
 **Database:** PostgreSQL runs on the host (not in Docker) so DB lifecycle is decoupled from `docker compose`. Backend reaches it via `host.docker.internal`.
+
+**LiveKit:** runs as **shared infrastructure** at `~/infra/livekit/` and is *not* part of this Compose project. Both this stack and the booking-app stack join the external `voice-shared` Docker network and reach LiveKit by service name.
 
 ---
 
@@ -67,21 +77,28 @@ Host
 git clone <repo-url>
 cd livekit-ai-voice-agent
 
-# 1. Create the database on your host Postgres (one-time).
+# 1. Create the shared docker network (one-time per host).
+docker network create voice-shared 2>/dev/null || true
+
+# 2. Bring up the shared LiveKit at ~/infra/livekit/ if it isn't already.
+#    (See its own README; it must publish itself on the voice-shared network.)
+
+# 3. Create the database on your host Postgres (one-time).
 #    Defaults expect user=postgres, password=password, db=voiceagent;
 #    override via .env if your local install differs.
 psql -U postgres -c "CREATE DATABASE voiceagent;"
 
-# 2. Copy the env template and fill in API keys.
+# 4. Copy the env template and fill in API keys + LIVEKIT_API_KEY/SECRET
+#    matching ~/infra/livekit/livekit.yaml.
 cp .env.example .env
 
-# 3. Start everything.
-docker compose up -d
+# 5. Start everything.
+docker compose up -d --build
 ```
 
 The backend auto-runs Postgres column migrations, seeds the default model catalogue, and downloads the LiveKit turn-detector model into a shared volume on first start. **No manual `download-files` step is needed.**
 
-Open **http://localhost:3000** and log in with the admin credentials from your `.env`.
+Open **http://localhost:${FRONTEND_PORT:-3000}** and log in with the admin credentials from your `.env`. In production, point your browser at the Apache HTTPS URL instead.
 
 ---
 
@@ -110,10 +127,14 @@ psql -d postgres -c "CREATE USER va WITH PASSWORD 'password'; GRANT ALL ON DATAB
 
 Set matching values in `.env` (`POSTGRES_USER`, `POSTGRES_PASSWORD`, etc.).
 
-### 3. LiveKit + supporting services
+### 3. Supporting services in Docker (LiveKit + Whisper + TTS)
 
 ```bash
-docker compose up -d livekit-server tts whisper-base
+# LiveKit comes from the shared infra, not this compose:
+( cd ~/infra/livekit && docker compose up -d )
+
+# STT/TTS containers from this stack:
+docker compose up -d tts whisper-base
 ```
 
 ### 4. Backend
@@ -121,8 +142,11 @@ docker compose up -d livekit-server tts whisper-base
 ```bash
 cd backend
 uv sync
-# Native: backend reaches host Postgres at localhost:5432 (via .env override).
-POSTGRES_HOST=localhost uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+# Native: backend reaches host Postgres at localhost:5432 and shared LiveKit
+# at the host port (not via the docker DNS name `livekit`).
+POSTGRES_HOST=localhost \
+LIVEKIT_URL=ws://localhost:7880 \
+  uv run uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
 ```
 
 ### 5. Agent worker
@@ -131,7 +155,7 @@ The backend auto-downloads the turn-detector model on startup. For native dev:
 
 ```bash
 cd backend
-uv run python agent.py start
+LIVEKIT_URL=ws://localhost:7880 uv run python agent.py start
 ```
 
 ### 6. Frontend
@@ -158,26 +182,35 @@ POSTGRES_USER=postgres
 POSTGRES_PASSWORD=password
 POSTGRES_DB=voiceagent
 
-# ─── Host port mappings (change when deploying) ──────────────────────
+# ─── Host port mappings ──────────────────────────────────────────────
+# HOST_BIND controls which host interface published ports listen on.
+# 127.0.0.1 (default) = loopback only; Apache fronts it for HTTPS.
+# 0.0.0.0             = all interfaces; for LAN/dev access without a proxy.
+HOST_BIND=127.0.0.1
 BACKEND_PORT=8000
 FRONTEND_PORT=3000
-LIVEKIT_PORT=7880
-TTS_PORT=8200
 VOICEBOX_PORT=17493
-WHISPER_BASE_PORT=8100        # + WHISPER_SMALL_PORT, WHISPER_TINY_PORT, …
 
-# ─── Public URL the browser sees (override behind a proxy) ───────────
-# LIVEKIT_PUBLIC_URL=ws://your.domain:7880
+# Whisper/TTS containers stay internal-only on the docker network — no host port.
+
+# ─── LiveKit URLs ────────────────────────────────────────────────────
+# Internal — used server-side by backend + agent. MUST be plain ws://
+# (LiveKit speaks unencrypted WS internally; Apache adds TLS only for
+# the browser). Using wss:// here fails with "SSL record layer failure".
+LIVEKIT_URL=ws://livekit:7880
+
+# Public — what the browser uses. In prod set to the WSS Apache exposes.
+LIVEKIT_PUBLIC_URL=wss://livekit.example.com
 
 # ─── Auth + secrets ──────────────────────────────────────────────────
-LIVEKIT_API_KEY=devkey
-LIVEKIT_API_SECRET=<your-secret>     # must match livekit.yaml
+LIVEKIT_API_KEY=devkey               # must match ~/infra/livekit/livekit.yaml
+LIVEKIT_API_SECRET=<your-secret>
 SECRET_KEY=<random-hex-32>           # JWT signing key
 FERNET_KEY=<fernet-key>              # encrypts customer API keys at rest
 
 # ─── Admin account (created on first startup) ────────────────────────
 ADMIN_EMAIL=admin@example.com
-ADMIN_PASSWORD=***REMOVED***
+ADMIN_PASSWORD=change-me-on-first-login
 
 # ─── Provider API keys (only needed for providers you actually use) ──
 GROQ_API_KEY=
@@ -202,22 +235,43 @@ python3 -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().
 
 ## Services & Ports
 
-All host-facing ports are env-configurable. The container-internal ports stay
-constant inside the Compose network — only the host-side mapping moves when
-you change `*_PORT` in `.env`.
+Only host-facing services are published; STT/TTS containers are reached
+internally over the `voice-shared` / default docker networks by service name.
 
-| Service | Default port | Env var |
-|---|---|---|
-| Frontend (dev) | 3000 | `FRONTEND_PORT` |
-| Backend | 8000 | `BACKEND_PORT` |
-| LiveKit signal | 7880 | `LIVEKIT_PORT` |
-| LiveKit RTC TCP | 7881 | `LIVEKIT_RTC_PORT` |
-| LiveKit RTC UDP | 7882 | `LIVEKIT_UDP_PORT` |
-| Whisper tiny / base / small | 8102 / 8100 / 8101 | `WHISPER_TINY_PORT` etc. |
-| Whisper multi (base / small) | 8103 / 8104 | `WHISPER_BASE_MULTI_PORT` etc. |
-| Piper TTS | 8200 | `TTS_PORT` |
-| Voicebox | 17493 | `VOICEBOX_PORT` |
-| PostgreSQL | 5432 | `POSTGRES_PORT` (on host, not Docker) |
+| Service | Container port | Host mapping | Env var |
+|---|---|---|---|
+| Frontend (nginx) | 80 | `${HOST_BIND}:${FRONTEND_PORT}` | `FRONTEND_PORT` |
+| Backend (FastAPI) | 8000 | `${HOST_BIND}:${BACKEND_PORT}` | `BACKEND_PORT` |
+| Voicebox (optional) | 17493 | `${HOST_BIND}:${VOICEBOX_PORT}` | `VOICEBOX_PORT` |
+| Whisper tiny / base / small | 8000 | *internal only* | — |
+| Whisper multi (base / small) | 8000 | *internal only* | — |
+| Piper TTS | 8000 | *internal only* | — |
+| LiveKit signal / RTC TCP / RTC UDP | 7880 / 7881 / 7882 | published by `~/infra/livekit/` | (separate stack) |
+| PostgreSQL | 5432 | host (not Docker) | `POSTGRES_PORT` |
+
+> Whisper, Piper, and (when not exposed) Voicebox are only reachable via
+> docker DNS names like `http://whisper-base:8000` or `http://tts:8000`
+> from inside the same Compose project. They do **not** bind host ports.
+
+---
+
+## Production: Apache reverse proxy
+
+Apache terminates TLS for the dashboard, the backend API, and LiveKit
+signaling. The container ports stay bound to `${HOST_BIND}` (loopback by
+default), so Apache is the only public ingress.
+
+**Required modules:** `proxy`, `proxy_http`, `proxy_wstunnel`, `rewrite`, `ssl`.
+
+A typical layout exposes three vhosts:
+
+- `app.example.com`     → `http://127.0.0.1:${FRONTEND_PORT}` (the React UI)
+- `api.example.com`     → `http://127.0.0.1:${BACKEND_PORT}` (FastAPI)
+- `livekit.example.com` → `http://127.0.0.1:7880` with WebSocket upgrade
+
+The third vhost is the WSS endpoint clients use for `LIVEKIT_PUBLIC_URL`.
+**LiveKit's UDP media port (7882) cannot be proxied** — open it directly
+on the host firewall.
 
 ---
 
@@ -318,10 +372,13 @@ livekit-ai-voice-agent/
 │       │   ├── TranscriptPanel/ # Conversation transcript
 │       │   └── LoginPage/
 │       └── store/               # Zustand: auth · call · models
-├── docker-compose.yml           # All host ports env-driven; no postgres container
-├── livekit.yaml                 # LiveKit server config (keys + ICE)
+├── voicebox/                    # Optional local TTS engine (profile: voicebox)
+├── docker-compose.yml           # project: ai-voice-cost-calc; no postgres, no livekit
 └── .env                         # Secrets, ports, DB connection, API keys
 ```
+
+> The LiveKit server config (`livekit.yaml`) and the LiveKit container live
+> under `~/infra/livekit/`, not in this repo. This stack only consumes it.
 
 ---
 
@@ -329,9 +386,12 @@ livekit-ai-voice-agent/
 
 | Problem | Fix |
 |---|---|
+| `network voice-shared declared as external, but could not be found` | Run `docker network create voice-shared` once on the host. |
 | Backend can't reach Postgres | Confirm host Postgres is running and listens on `POSTGRES_PORT`. Inside Docker, `POSTGRES_HOST` must be `host.docker.internal` (already the default). |
-| `could not establish signal connection` | LiveKit container not running — `docker compose up -d livekit-server`. |
-| `could not establish pc connection` | ICE IP mismatch — ensure `livekit.yaml` is mounted and `--node-ip 127.0.0.1` is set. |
+| `could not establish signal connection` | Shared LiveKit container not running. `cd ~/infra/livekit && docker compose ps`. |
+| `SSL record layer failure` connecting to LiveKit | `LIVEKIT_URL` is `wss://…`. Internal must be plain `ws://livekit:7880`; only the browser-facing `LIVEKIT_PUBLIC_URL` is `wss://`. |
+| `port is already allocated` on `up` | An orphan container from a prior project name still holds the port. `docker ps -a` to find it, then `docker rm -f <name>`. |
+| `could not establish pc connection` | ICE IP mismatch — check the shared LiveKit's `livekit.yaml` and that UDP 7882 is reachable from clients. |
 | Browser says `403 Account is disabled` | Admin disabled the user — re-enable in Admin → Users. |
 | `429 Concurrent-call limit reached` | The customer hit their quota — bump it in Admin → Settings, or wait for active calls to finish. |
 | Turn-detector model missing | Backend auto-downloads on startup. If it failed (no internet at first start), open Admin → check the setup endpoint. |
