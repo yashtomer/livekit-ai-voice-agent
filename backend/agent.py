@@ -77,7 +77,7 @@ LLM_MAX_TOKENS = 150
 # Default config used when metadata missing/malformed
 DEFAULT_CONFIG = {
     "stt": {"provider": "whisper_local", "size": "base"},
-    "llm": {"provider": "ollama", "model": "gemma4:e2b"},
+    "llm": {"provider": "ollama", "model": "qwen2.5:3b"},
     "tts": {"provider": "piper_local", "voice": "alloy"},
 }
 
@@ -610,7 +610,7 @@ def build_stt(cfg: dict, language: str = "en"):
 def build_llm(cfg: dict):
     """Build an LLM instance from config dict."""
     provider = cfg.get("provider", "ollama")
-    model = cfg.get("model", "gemma4:e2b")
+    model = cfg.get("model", "qwen2.5:3b")
 
     if provider == "ollama":
         return openai.LLM(
