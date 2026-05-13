@@ -1175,10 +1175,7 @@ if __name__ == "__main__":
         WorkerOptions(
             entrypoint_fnc=entrypoint,
             prewarm_fnc=prewarm,
-            # Keep one idle pre-warmed process ready at all times so the
-            # first user to click Start Call doesn't pay the ~17s cold-start
-            # cost (fork + Ollama load + TTS load). Additional concurrent
-            # jobs still cold-start but the first is always fast.
+            agent_name=os.environ.get("AGENT_NAME", "cost-calc-agent"),
             num_idle_processes=1,
         ),
     )
