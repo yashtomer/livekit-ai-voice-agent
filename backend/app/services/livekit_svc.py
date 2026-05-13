@@ -3,6 +3,7 @@ import secrets
 from datetime import timedelta
 from livekit import api as lk_api
 from ..config import (
+    AGENT_NAME,
     LIVEKIT_API_KEY,
     LIVEKIT_API_SECRET,
     LIVEKIT_PUBLIC_URL,
@@ -55,6 +56,10 @@ async def build_token(
             can_publish=True,
             can_subscribe=True,
             can_publish_data=True,
+        ))
+        .with_room_config(lk_api.RoomConfiguration(
+            name=room_name,
+            agents=[lk_api.RoomAgentDispatch(agent_name=AGENT_NAME)],
         ))
         .to_jwt()
     )
