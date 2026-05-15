@@ -1,11 +1,12 @@
 import { useEffect, useState, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Loader, AlertCircle, TrendingUp, ChevronRight, ChevronDown, Check, Lock } from 'lucide-react'
+import { Loader, AlertCircle, TrendingUp, ChevronRight, ChevronDown, Check, Lock, Phone } from 'lucide-react'
 import Layout from '../components/Layout'
 import CostEstimator from '../components/CostEstimator'
 import CallInterface from '../components/CallInterface'
 import TranscriptPanel from '../components/TranscriptPanel'
 import MetricsPanel from '../components/MetricsPanel'
+import UltravoxCall from '../components/UltravoxCall'
 import { useModelStore, ModelOption } from '../store/modelStore'
 import api from '../api/client'
 
@@ -158,6 +159,7 @@ function ModelSelect({
 export default function Dashboard() {
   const { setModels, selectedStt, selectedLlm, selectedTts, setSelectedStt, setSelectedLlm, setSelectedTts, models } =
     useModelStore()
+  const [showUltravox, setShowUltravox] = useState(false)
 
   const { data: fxData } = useQuery({
     queryKey: ['fx-rate'],
@@ -285,7 +287,31 @@ export default function Dashboard() {
             {/* ── Middle column ── */}
             <div className="space-y-4">
               <CallInterface />
+              
+              {/* WhatsApp Agent Info */}             
               <MetricsPanel />
+
+               <div className="card">
+                <h3 className="section-title mb-3">
+                  <span className="w-5 h-5 rounded-md bg-green-500/10 flex items-center justify-center">
+                    <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                  </span>
+                  WhatsApp Agent
+                </h3>
+                <div className="flex flex-col items-center gap-2 p-4 bg-green-500/5 rounded-xl border border-green-500/10">
+                  <p className="text-sm font-medium text-foreground">Call our Ultravox Healthcare Agent</p>
+                  <p className="text-xl font-bold text-green-600 dark:text-green-400 tracking-tight">+1 555 1593204</p>
+                  <p className="text-xs text-muted-foreground text-center leading-relaxed mb-2">
+                    Write or call this number on WhatsApp to connect with our Ultravox Healthcare agent directly.
+                  </p>
+                  <button 
+                    onClick={() => setShowUltravox(true)}
+                    className="flex-1 flex items-center justify-center gap-2 btn-primary py-2.5 text-base"
+                  >
+                    <Phone className="w-4 h-4" /> Start Web Call
+                  </button>
+                </div>
+              </div>
             </div>
 
             {/* ── Right column ── */}
@@ -295,6 +321,9 @@ export default function Dashboard() {
           </div>
         )}
       </div>
+      {showUltravox && (
+        <UltravoxCall onClose={() => setShowUltravox(false)} />
+      )}
     </Layout>
   )
 }

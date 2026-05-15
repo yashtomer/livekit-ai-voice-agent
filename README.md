@@ -12,6 +12,8 @@ Compare STT, LLM, and TTS providers side-by-side, estimate monthly infrastructur
 
 - **Multi-provider voice pipeline** — mix and match STT, LLM, and TTS from different providers per call.
 - **Live voice calls** — real WebRTC calls via LiveKit with mute, timer, and auto-disconnect.
+- **Ultravox browser calling** — one-click AI voice call from the dashboard using the Ultravox WebRTC SDK.
+- **WhatsApp AI calling** — incoming WhatsApp calls answered automatically by an Ultravox AI agent.
 - **Real-time metrics** — STT / LLM / TTS latency, TTFT, tokens/sec, and traffic-light quality dots after each turn.
 - **Smart cost estimator** — auto-picks AWS or GCP server tier based on each model's `compute_profile`; concurrency-aware (`ceil(agents / capacity)`); editable traffic baselines (LLM tokens/hr, TTS chars/hr).
 - **Per-user usage quotas** — admin-tunable concurrent + daily call limits prevent vendor-bill leakage.
@@ -55,15 +57,30 @@ Host
        │                                       │
        │                                       └─► STT/LLM/TTS containers (internal only)
        │
+       ├─ whatsapp-bridge (Node.js, port 3001) ── network_mode: host
+       │    │   Handles incoming WhatsApp calls via Meta webhook
+       │    └─► Ultravox API (WebSocket) + WhatsApp WebRTC (aiortc)
+       │
        └─ whisper-{tiny,base,small,base-multi,small-multi} · tts (Piper) · voicebox
             ▲ no host ports — reached over the docker network by service name
 ```
 
-**Call flow:**
+**LiveKit call flow:**
 1. Browser requests a token from the FastAPI backend (selected model config embedded in metadata).
 2. Backend signs a token whose URL is `LIVEKIT_PUBLIC_URL` (the WSS Apache exposes); browser connects there.
 3. Agent worker picks up the room (signaling over `LIVEKIT_URL=ws://livekit:7880` on the shared docker network), reads metadata, and builds the STT → LLM → TTS pipeline.
 4. Real-time transcript + per-stage latency metrics are sent back to the browser via LiveKit data messages.
+
+**Ultravox browser call flow:**
+1. Browser calls `POST /api/ultravox/create-web-call` on the FastAPI backend.
+2. Backend calls the Ultravox API and returns a `joinUrl`.
+3. Browser connects directly to Ultravox via the `ultravox-client` SDK (WebRTC, no server relay needed).
+
+**WhatsApp call flow:**
+1. User calls the WhatsApp Business number.
+2. Meta sends a `connect` webhook event (with WebRTC SDP offer) to `POST /call-events` on the whatsapp-bridge.
+3. Bridge creates an Ultravox session, sets up WebRTC with Meta, and bridges audio both ways.
+4. On hangup, Meta sends a `terminate` event and the bridge cleans up.
 
 **Database:** PostgreSQL runs on the host (not in Docker) so DB lifecycle is decoupled from `docker compose`. Backend reaches it via `host.docker.internal`.
 
@@ -170,6 +187,58 @@ Open **http://localhost:3000**
 
 ---
 
+## Ultravox Setup
+
+### Browser calling
+
+1. Add your Ultravox API key in the dashboard **Config** modal under the `ultravox` provider.
+2. Click the **Ultravox** call button — the backend creates a session and the browser connects directly.
+
+No extra config needed; the `/api/ultravox/create-web-call` endpoint is always available.
+
+### WhatsApp AI calling
+
+#### Prerequisites
+
+- A **WhatsApp Business** account with Calling API access (apply via Meta Business Suite).
+- An **Ultravox API key** (add to `.env` as `ULTRAVOX_API_KEY`).
+- A publicly reachable HTTPS URL for the webhook (ngrok for local dev, Apache for production).
+
+#### Required `.env` variables
+
+```env
+ULTRAVOX_API_KEY=uv-...
+PHONE_NUMBER_ID=<your Meta phone number ID>
+ACCESS_TOKEN=<your Meta permanent access token>
+META_VERIFY_TOKEN=<any secret string you choose>
+WHATSAPP_BRIDGE_PORT=3001   # optional, default 3001
+```
+
+#### Local development with ngrok
+
+```bash
+# Start the stack
+docker compose up -d
+
+# Expose the whatsapp-bridge port
+ngrok http 3001
+```
+
+Copy the ngrok HTTPS URL (e.g. `https://abc123.ngrok.io`).
+
+#### Meta webhook configuration
+
+1. Go to **Meta Developer Console** → your app → **WhatsApp** → **Configuration**.
+2. Under **Webhook**, click **Edit**:
+   - **Callback URL**: `https://abc123.ngrok.io/call-events`
+   - **Verify token**: the value you set as `META_VERIFY_TOKEN` in `.env`
+3. Click **Verify and Save** — Meta will send a GET request to confirm the token.
+4. Under **Webhook Fields**, subscribe to **calls**.
+
+Call your WhatsApp Business number — the AI agent will answer automatically.
+
+---
+
 ## Environment Variables
 
 Copy `.env.example` to `.env` and fill in the keys for the providers you want to use.
@@ -220,6 +289,16 @@ GOOGLE_API_KEY=
 DEEPGRAM_API_KEY=
 ELEVENLABS_API_KEY=
 DEEPSEEK_API_KEY=
+
+# ─── Ultravox (browser + WhatsApp calling) ───────────────────────────
+ULTRAVOX_API_KEY=uv-...
+
+# ─── WhatsApp Business (Meta) ────────────────────────────────────────
+# Required only if you want AI to answer WhatsApp calls.
+PHONE_NUMBER_ID=              # Meta phone number ID
+ACCESS_TOKEN=                 # Meta permanent system user access token
+META_VERIFY_TOKEN=            # Any secret string — must match Meta webhook config
+WHATSAPP_BRIDGE_PORT=3001     # Host port for the whatsapp-bridge service
 ```
 
 Generate keys:
@@ -242,12 +321,15 @@ internally over the `voice-shared` / default docker networks by service name.
 |---|---|---|---|
 | Frontend (nginx) | 80 | `${HOST_BIND}:${FRONTEND_PORT}` | `FRONTEND_PORT` |
 | Backend (FastAPI) | 8000 | `${HOST_BIND}:${BACKEND_PORT}` | `BACKEND_PORT` |
+| WhatsApp bridge (Node.js) | 3001 | host port 3001 (`network_mode: host`) | `WHATSAPP_BRIDGE_PORT` |
 | Voicebox (optional) | 17493 | `${HOST_BIND}:${VOICEBOX_PORT}` | `VOICEBOX_PORT` |
 | Whisper tiny / base / small | 8000 | *internal only* | — |
 | Whisper multi (base / small) | 8000 | *internal only* | — |
 | Piper TTS | 8000 | *internal only* | — |
 | LiveKit signal / RTC TCP / RTC UDP | 7880 / 7881 / 7882 | published by `~/infra/livekit/` | (separate stack) |
 | PostgreSQL | 5432 | host (not Docker) | `POSTGRES_PORT` |
+
+> `whatsapp-bridge` uses `network_mode: host` so that the Node.js WebRTC stack can resolve the host's real public IP via STUN. Docker's NAT hides the public IP from STUN, causing Meta to reject the SDP — host networking bypasses this.
 
 > Whisper, Piper, and (when not exposed) Voicebox are only reachable via
 > docker DNS names like `http://whisper-base:8000` or `http://tts:8000`
@@ -272,6 +354,25 @@ A typical layout exposes three vhosts:
 The third vhost is the WSS endpoint clients use for `LIVEKIT_PUBLIC_URL`.
 **LiveKit's UDP media port (7882) cannot be proxied** — open it directly
 on the host firewall.
+
+### WhatsApp webhook via Apache
+
+The `whatsapp-bridge` binds directly on host port 3001 (`network_mode: host`).
+Add a location block to your existing API vhost so Meta can reach it over HTTPS
+without exposing port 3001 publicly:
+
+```apache
+# Inside your api.example.com (or app.example.com) VirtualHost
+ProxyPass        /call-events  http://127.0.0.1:3001/call-events
+ProxyPassReverse /call-events  http://127.0.0.1:3001/call-events
+```
+
+Then set Meta's **Callback URL** to:
+```
+https://api.example.com/call-events
+```
+
+No firewall rule for port 3001 is needed — only Apache talks to it.
 
 ---
 
@@ -372,6 +473,10 @@ livekit-ai-voice-agent/
 │       │   ├── TranscriptPanel/ # Conversation transcript
 │       │   └── LoginPage/
 │       └── store/               # Zustand: auth · call · models
+├── whatsapp/                    # WhatsApp ↔ Ultravox bridge (Node.js)
+│   ├── server-ultravox.js       # WhatsApp webhook + WebRTC + Ultravox WS bridge
+│   ├── package.json
+│   └── Dockerfile
 ├── voicebox/                    # Optional local TTS engine (profile: voicebox)
 ├── docker-compose.yml           # project: ai-voice-cost-calc; no postgres, no livekit
 └── .env                         # Secrets, ports, DB connection, API keys
@@ -396,6 +501,9 @@ livekit-ai-voice-agent/
 | `429 Concurrent-call limit reached` | The customer hit their quota — bump it in Admin → Settings, or wait for active calls to finish. |
 | Turn-detector model missing | Backend auto-downloads on startup. If it failed (no internet at first start), open Admin → check the setup endpoint. |
 | `Ollama unreachable` warning | Normal if Ollama is not installed — local LLM models won't appear. |
+| WhatsApp webhook verify fails | Ensure `META_VERIFY_TOKEN` in `.env` matches exactly what you entered in Meta's webhook config. Check `docker compose logs whatsapp-bridge`. |
+| WhatsApp call rings but agent doesn't answer | Check `docker compose logs whatsapp-bridge` for `pre_accept` errors. Confirm `PHONE_NUMBER_ID` and `ACCESS_TOKEN` are set correctly in `.env`. |
+| WhatsApp bridge not starting | `@roamhq/wrtc` needs native build tools — rebuild with `docker compose build whatsapp-bridge`. |
 | FX rate not showing | Frankfurter API unreachable — badge is hidden automatically. |
 | Last admin can't be disabled | By design — activate another admin account first. |
 | Re-seeding clobbered an admin price edit | Won't happen: rows admins have edited get `is_seed=false` and are skipped by the reseed reconcile. Click "Reset to seed" on a row to re-adopt the seed default. |

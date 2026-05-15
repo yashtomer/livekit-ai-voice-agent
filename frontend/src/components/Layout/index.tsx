@@ -1,12 +1,13 @@
 import { useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
-  LayoutDashboard, Shield, Settings, LogOut, ChevronDown, User, Sun, Moon,
+  LayoutDashboard, Shield, Settings, LogOut, ChevronDown, User, Sun, Moon, Phone,
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useUIStore } from '../../store/uiStore'
 import { useTheme } from '../../lib/theme'
 import ConfigModal from '../ConfigModal'
+import UltravoxCall from '../UltravoxCall'
 
 interface LayoutProps {
   children: React.ReactNode
@@ -24,6 +25,7 @@ export default function Layout({ children }: LayoutProps) {
     closeConfigModal,
   } = useUIStore()
   const [showUserMenu, setShowUserMenu] = useState(false)
+  const [isUltravoxCallOpen, setIsUltravoxCallOpen] = useState(false)
 
   const handleLogout = () => {
     logout()
@@ -132,6 +134,15 @@ export default function Layout({ children }: LayoutProps) {
                 </>
               )}
             </div>
+
+            {/* Ultravox Web Call Button */}
+            <button
+              onClick={() => setIsUltravoxCallOpen(true)}
+              className="flex items-center gap-2 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-all btn-primary whitespace-nowrap"
+            >
+              <Phone className="w-3.5 h-3.5" />
+              Ultravox Whatsapp
+            </button>
           </div>
         </div>
       </header>
@@ -144,6 +155,10 @@ export default function Layout({ children }: LayoutProps) {
           onClose={closeConfigModal}
           highlightProvider={configModalHighlightProvider}
         />
+      )}
+
+      {isUltravoxCallOpen && (
+        <UltravoxCall onClose={() => setIsUltravoxCallOpen(false)} />
       )}
     </div>
   )

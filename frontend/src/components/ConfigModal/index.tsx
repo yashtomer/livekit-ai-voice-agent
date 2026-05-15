@@ -13,6 +13,7 @@ const PROVIDER_LABELS: Record<string, string> = {
   elevenlabs: 'ElevenLabs',
   deepseek: 'DeepSeek',
   azure: 'Azure Speech',
+  ultravox: 'Ultravox',
 }
 
 const PROVIDER_HINTS: Record<string, string> = {
@@ -24,6 +25,7 @@ const PROVIDER_HINTS: Record<string, string> = {
   elevenlabs: 'API key',
   deepseek: 'sk-…',
   azure: 'Speech service key',
+  ultravox: 'X-API-Key',
 }
 
 interface ConfigModalProps {

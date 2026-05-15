@@ -26,6 +26,17 @@ name: ai-voice-cost-calc
 
 services:
 
+  # ─── Database (PostgreSQL container) ───
+  db:
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-postgres}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-password}
+      - POSTGRES_DB=${POSTGRES_DB:-voiceagent}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    restart: unless-stopped
+
   # ─── Whisper STT containers ───
   whisper-base:
     image: fedirz/faster-whisper-server:latest-cpu
@@ -110,7 +121,7 @@ services:
     ports: ["${HOST_BIND:-127.0.0.1}:${BACKEND_PORT:-8000}:8000"]
     environment:
       - AGENT_NAME=${AGENT_NAME:-cost-calc-agent}
-      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@${POSTGRES_HOST:-host.docker.internal}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-voiceagent}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@db:5432/${POSTGRES_DB:-voiceagent}
       - SECRET_KEY=${SECRET_KEY:-dev-secret-key-change-in-production}
       - FERNET_KEY=${FERNET_KEY:-***REMOVED***}
       - INTERNAL_AGENT_SECRET=${INTERNAL_AGENT_SECRET:-dev-internal-agent-secret-change-in-production}
@@ -139,21 +150,53 @@ services:
       - path: .env
         required: false
     volumes:
+      - ./backend:/app
+      - /app/.venv
       - livekit-hf-cache:/root/.cache/huggingface
       - quality-data:/data
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     networks:
       - default
       - voice-shared
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    depends_on:
+      - db
     restart: unless-stopped
 
   # ─── Frontend (React/Vite → nginx) ───
   frontend:
-    build: ./frontend
-    ports: ["${HOST_BIND:-127.0.0.1}:${FRONTEND_PORT:-3000}:80"]
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+
+    ports: ["${HOST_BIND:-127.0.0.1}:${FRONTEND_PORT:-3000}:${FRONTEND_PORT:-3000}"]
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: npm run dev -- --host 0.0.0.0
+    environment:
+      - VITE_BACKEND_URL=http://backend:8000
     depends_on:
       - backend
+      - whatsapp-bridge
+    restart: unless-stopped
+
+  # ─── WhatsApp ↔ Ultravox bridge (JS/WebRTC) ───
+  # Must use network_mode: host so STUN resolves the real public IP.
+  # Docker NAT hides the host IP from STUN, causing Meta to reject the SDP.
+  whatsapp-bridge:
+    build: ./whatsapp
+    network_mode: host
+    environment:
+      - PORT=${WHATSAPP_BRIDGE_PORT:-3001}
+      - PHONE_NUMBER_ID=${PHONE_NUMBER_ID}
+      - ACCESS_TOKEN=${ACCESS_TOKEN}
+      - ULTRAVOX_API_KEY=${ULTRAVOX_API_KEY}
+      - META_VERIFY_TOKEN=${META_VERIFY_TOKEN}
+    env_file:
+      - path: .env
+        required: false
     restart: unless-stopped
 
   # ─── Agent worker ───
@@ -190,11 +233,14 @@ services:
       - whisper-base
       - tts
       - backend
+      - db
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
 
+
 volumes:
+  postgres-data:
   tts-voices:
   voicebox-data:
   huggingface-cache:

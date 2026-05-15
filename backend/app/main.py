@@ -11,7 +11,7 @@ from .db import engine, SessionLocal, Base
 from .models import User, UserRole, UserAPIKey, ModelEntry, CallSession, AdminSetting
 from .services.auth import hash_password
 from .seed_data import SEED_MODELS, compute_profile_for
-from .routes import auth, models_route, token_route, admin_route, config_routes, tts_route, fx_route, setup_route, internal_route
+from .routes import auth, models_route, token_route, admin_route, config_routes, tts_route, fx_route, setup_route, internal_route, ultravox
 from .services import model_setup, room_config_cache
 
 from .log_buffer import install as _install_log_buffer
@@ -202,6 +202,7 @@ app.include_router(setup_route.router,   prefix="/api/setup",  tags=["setup"])
 # Internal endpoints — agent worker only, NOT for browser use.
 # Protected by X-Internal-Secret header inside the route.
 app.include_router(internal_route.router, prefix="/internal", tags=["internal"])
+app.include_router(ultravox.router,       prefix="/api/ultravox", tags=["ultravox"])
 
 
 @app.get("/health")
