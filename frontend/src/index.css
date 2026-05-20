@@ -130,6 +130,32 @@
     @apply text-sm font-semibold text-foreground flex items-center gap-2;
   }
 
+  /* ─── Range slider thumb ───────────────────── */
+  input[type='range']::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    appearance: none;
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: hsl(var(--primary));
+    border: 2px solid hsl(var(--card));
+    box-shadow: 0 0 0 1px hsl(var(--primary) / 0.4);
+    cursor: pointer;
+    transition: box-shadow 0.15s ease;
+  }
+  input[type='range']::-webkit-slider-thumb:hover {
+    box-shadow: 0 0 0 4px hsl(var(--primary) / 0.2);
+  }
+  input[type='range']::-moz-range-thumb {
+    width: 14px;
+    height: 14px;
+    border-radius: 50%;
+    background: hsl(var(--primary));
+    border: 2px solid hsl(var(--card));
+    box-shadow: 0 0 0 1px hsl(var(--primary) / 0.4);
+    cursor: pointer;
+  }
+
   /* ─── Status dot ───────────────────────────── */
   .status-dot {
     @apply w-2 h-2 rounded-full;

@@ -1,13 +1,13 @@
 import { useEffect, useState, useRef } from 'react'
 import { useQuery } from '@tanstack/react-query'
-import { Loader, AlertCircle, TrendingUp, ChevronRight, ChevronDown, Check, Lock, Phone } from 'lucide-react'
+import { Loader, AlertCircle, TrendingUp, ChevronRight, ChevronDown, Check, Lock, Phone, SlidersHorizontal } from 'lucide-react'
 import Layout from '../components/Layout'
 import CostEstimator from '../components/CostEstimator'
 import CallInterface from '../components/CallInterface'
 import TranscriptPanel from '../components/TranscriptPanel'
 import MetricsPanel from '../components/MetricsPanel'
 import UltravoxCall from '../components/UltravoxCall'
-import { useModelStore, ModelOption } from '../store/modelStore'
+import { useModelStore, ModelOption, DEFAULT_LLM_PARAMS, DEFAULT_TTS_PARAMS } from '../store/modelStore'
 import api from '../api/client'
 
 function parseLatencyMs(label: string): number {
@@ -38,6 +38,194 @@ function parseModelLabel(label: string): { name: string; details: string } {
     name: label.slice(0, pipeIdx).trim(),
     details: label.slice(pipeIdx + 3).trim(),
   }
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+function SliderRow({
+  label,
+  value,
+  min,
+  max,
+  step,
+  onChange,
+  format,
+  hint,
+}: {
+  label: string
+  value: number
+  min: number
+  max: number
+  step: number
+  onChange: (v: number) => void
+  format?: (v: number) => string
+  hint?: string
+}) {
+  const display = format ? format(value) : value.toFixed(step < 0.1 ? 2 : step < 1 ? 1 : 0)
+  const pct = ((value - min) / (max - min)) * 100
+
+  return (
+    <div className="space-y-1">
+      <div className="flex items-center justify-between gap-2">
+        <label className="text-xs font-medium text-foreground">{label}</label>
+        <span className="text-xs font-semibold text-primary tabular-nums w-10 text-right">{display}</span>
+      </div>
+      <div className="relative">
+        <input
+          type="range"
+          min={min}
+          max={max}
+          step={step}
+          value={value}
+          onChange={(e) => onChange(parseFloat(e.target.value))}
+          className="w-full h-1.5 rounded-full appearance-none cursor-pointer"
+          style={{
+            background: `linear-gradient(to right, hsl(var(--primary)) ${pct}%, hsl(var(--muted)) ${pct}%)`,
+          }}
+        />
+      </div>
+      {hint && <p className="text-[10px] text-muted-foreground leading-relaxed">{hint}</p>}
+    </div>
+  )
+}
+
+function AdvancedSettings() {
+  const [open, setOpen] = useState(false)
+  const { llmParams, ttsParams, setLlmParams, setTtsParams, selectedTts } = useModelStore()
+
+  const ttsProvider = selectedTts?.provider ?? ''
+  const showElevenLabsParams = ttsProvider === 'elevenlabs'
+  const showSpeedParam = ['openai', 'piper_local'].includes(ttsProvider)
+
+  const hasNonDefault =
+    llmParams.temperature !== DEFAULT_LLM_PARAMS.temperature ||
+    llmParams.top_p !== DEFAULT_LLM_PARAMS.top_p ||
+    llmParams.max_tokens !== DEFAULT_LLM_PARAMS.max_tokens ||
+    ttsParams.stability !== DEFAULT_TTS_PARAMS.stability ||
+    ttsParams.clarity !== DEFAULT_TTS_PARAMS.clarity ||
+    ttsParams.style_exaggeration !== DEFAULT_TTS_PARAMS.style_exaggeration ||
+    ttsParams.speed !== DEFAULT_TTS_PARAMS.speed
+
+  const reset = () => {
+    setLlmParams({ ...DEFAULT_LLM_PARAMS })
+    setTtsParams({ ...DEFAULT_TTS_PARAMS })
+  }
+
+  return (
+    <div className="border border-border rounded-xl overflow-hidden">
+      {/* Header toggle */}
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center justify-between gap-2 px-3 py-2.5 hover:bg-muted/60 transition-colors"
+      >
+        <div className="flex items-center gap-2">
+          <SlidersHorizontal className="w-3.5 h-3.5 text-muted-foreground" />
+          <span className="text-xs font-semibold text-foreground">Advanced Settings</span>
+          {hasNonDefault && (
+            <span className="text-[10px] font-bold px-1.5 py-0.5 rounded-full bg-primary/10 text-primary">
+              Custom
+            </span>
+          )}
+        </div>
+        <ChevronDown className={`w-3.5 h-3.5 text-muted-foreground transition-transform duration-200 ${open ? 'rotate-180' : ''}`} />
+      </button>
+
+      {/* Body */}
+      {open && (
+        <div className="px-3 pb-3 pt-1 space-y-4 border-t border-border bg-muted/20">
+
+          {/* LLM section */}
+          <div className="space-y-3">
+            <div className="flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-500" />
+              <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Language Model</p>
+            </div>
+            <SliderRow
+              label="Temperature"
+              value={llmParams.temperature}
+              min={0} max={2} step={0.05}
+              onChange={(v) => setLlmParams({ temperature: v })}
+              hint="Lower = focused · Higher = creative"
+            />
+            <SliderRow
+              label="Top P"
+              value={llmParams.top_p}
+              min={0.01} max={1} step={0.01}
+              onChange={(v) => setLlmParams({ top_p: v })}
+              hint="Nucleus sampling — tune one of Temperature or Top P, not both"
+            />
+            <SliderRow
+              label="Max Tokens"
+              value={llmParams.max_tokens}
+              min={50} max={2000} step={10}
+              format={(v) => String(v)}
+              onChange={(v) => setLlmParams({ max_tokens: v })}
+              hint="Max response length — keep low for voice to stay concise"
+            />
+          </div>
+
+          {/* TTS section */}
+          {(showElevenLabsParams || showSpeedParam) && (
+            <div className="space-y-3">
+              <div className="flex items-center gap-1.5">
+                <span className="w-1.5 h-1.5 rounded-full bg-green-500" />
+                <p className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground">Text-to-Speech</p>
+              </div>
+
+              {showElevenLabsParams && (
+                <>
+                  <SliderRow
+                    label="Stability"
+                    value={ttsParams.stability}
+                    min={0} max={1} step={0.05}
+                    onChange={(v) => setTtsParams({ stability: v })}
+                    hint="Higher = consistent · Lower = expressive & varied"
+                  />
+                  <SliderRow
+                    label="Clarity"
+                    value={ttsParams.clarity}
+                    min={0} max={1} step={0.05}
+                    onChange={(v) => setTtsParams({ clarity: v })}
+                    hint="How closely the output matches the target voice"
+                  />
+                  <SliderRow
+                    label="Style Exaggeration"
+                    value={ttsParams.style_exaggeration}
+                    min={0} max={1} step={0.05}
+                    onChange={(v) => setTtsParams({ style_exaggeration: v })}
+                    hint="Amplifies accent/speaking style — high values may reduce quality"
+                  />
+                </>
+              )}
+
+              {showSpeedParam && (
+                <SliderRow
+                  label="Speed"
+                  value={ttsParams.speed}
+                  min={0.25} max={4} step={0.05}
+                  format={(v) => `${v.toFixed(2)}×`}
+                  onChange={(v) => setTtsParams({ speed: v })}
+                  hint="Playback speed of synthesized speech"
+                />
+              )}
+            </div>
+          )}
+
+          {/* Reset */}
+          {hasNonDefault && (
+            <button
+              type="button"
+              onClick={reset}
+              className="text-[11px] text-muted-foreground hover:text-destructive transition-colors underline underline-offset-2"
+            >
+              Reset to defaults
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  )
 }
 
 function ModelSelect({
@@ -257,6 +445,10 @@ export default function Dashboard() {
                     selected={selectedTts}
                     onSelect={setSelectedTts}
                   />
+                </div>
+
+                <div className="mt-3">
+                  <AdvancedSettings />
                 </div>
 
                 {/* Per-model summary */}

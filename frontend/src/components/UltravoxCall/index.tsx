@@ -48,8 +48,8 @@ export default function UltravoxCall({ onClose }: UltravoxCallProps) {
   const syncStatus = (newStatus: UltravoxSessionStatus) => {
     statusRef.current = newStatus;
     setStatus(newStatus);
-    if (newStatus === UltravoxSessionStatus.LIVE) {
-      console.log('[Ultravox] Sync: Call is now LIVE');
+    if (newStatus === UltravoxSessionStatus.IDLE) {
+      console.log('[Ultravox] Sync: Call is now connected (IDLE = ready)');
       startCall('ultravox-session', 300);
       setStoreStatus('connected');
     } else if (newStatus === UltravoxSessionStatus.DISCONNECTED) {
@@ -59,6 +59,7 @@ export default function UltravoxCall({ onClose }: UltravoxCallProps) {
 
   const startUltravoxSession = async () => {
     try {
+      statusRef.current = UltravoxSessionStatus.CONNECTING;
       setStatus(UltravoxSessionStatus.CONNECTING);
       const { data } = await api.post('/ultravox/create-web-call');
 
@@ -68,45 +69,27 @@ export default function UltravoxCall({ onClose }: UltravoxCallProps) {
       const session = new UltravoxSession();
       sessionRef.current = session;
 
-      // Register all known event names for status
+      // SDK fires 'status' (UltravoxSessionStatusChangedEvent)
       const onStatus = () => {
         console.log('[Ultravox] Event: Status changed to', session.status);
         syncStatus(session.status);
       };
-      
-      session.addEventListener('statuschanged', onStatus);
-      // @ts-ignore
-      session.addEventListener('status-changed', onStatus);
-      // @ts-ignore
-      if (session.on) {
-        // @ts-ignore
-        session.on('statuschanged', onStatus);
-      }
+      session.addEventListener('status', onStatus);
 
-      // Register all known event names for transcripts
-      const onTranscript = (event: any) => {
-        const transcript = event.transcript || event;
-        console.log('[Ultravox] Transcript data:', transcript);
-        
-        const text = transcript.text;
-        const isFinal = transcript.final === true || transcript.isFinal === true;
-        let role = (transcript.role || '').toLowerCase();
-        
-        if (role === 'model' || role === 'agent') role = 'agent';
-        if (role === 'user') role = 'user';
-
-        if (text && isFinal && (role === 'agent' || role === 'user')) {
-          console.log(`[Ultravox] Adding to store: [${role}] ${text}`);
-          addMessage({
-            role: role as 'agent' | 'user',
-            text: text
-          });
+      // SDK fires 'transcripts' (UltravoxTranscriptsChangedEvent); read from session.transcripts
+      const seenFinals = new Set<string>();
+      const onTranscripts = () => {
+        for (const t of session.transcripts) {
+          if (!t.isFinal) continue;
+          const key = `${t.speaker}:${t.text}`;
+          if (seenFinals.has(key)) continue;
+          seenFinals.add(key);
+          const role = t.speaker === 'agent' ? 'agent' : 'user';
+          console.log(`[Ultravox] Final transcript [${role}]: ${t.text}`);
+          addMessage({ role, text: t.text });
         }
       };
-
-      session.addEventListener('transcript', onTranscript);
-      // @ts-ignore
-      session.addEventListener('transcription', onTranscript);
+      session.addEventListener('transcripts', onTranscripts);
 
       session.addEventListener('error', (event: any) => {
         console.error('[Ultravox] Session Error:', event);
@@ -117,9 +100,9 @@ export default function UltravoxCall({ onClose }: UltravoxCallProps) {
       await session.joinCall(data.joinUrl);
       console.log('[Ultravox] session.joinCall completed.');
       
-      // If joinCall completed but status is still CONNECTING, manually check
+      // If joinCall completed but status is still CONNECTING, wait for statuschanged event
       if (session.status === UltravoxSessionStatus.CONNECTING) {
-        console.log('[Ultravox] joinCall finished but status still CONNECTING. Waiting for LIVE...');
+        console.log('[Ultravox] joinCall finished but status still CONNECTING. Waiting for IDLE...');
       }
       
     } catch (err: any) {
@@ -145,8 +128,16 @@ export default function UltravoxCall({ onClose }: UltravoxCallProps) {
     }
   };
 
-  const isConnecting = status === UltravoxSessionStatus.CONNECTING || status === UltravoxSessionStatus.IDLE;
-  const isLive = status === UltravoxSessionStatus.LIVE;
+  const isConnecting = status === UltravoxSessionStatus.CONNECTING;
+  const isLive = status === UltravoxSessionStatus.IDLE
+    || status === UltravoxSessionStatus.LISTENING
+    || status === UltravoxSessionStatus.THINKING
+    || status === UltravoxSessionStatus.SPEAKING;
+
+  const liveStatusLabel =
+    status === UltravoxSessionStatus.SPEAKING ? 'Speaking' :
+    status === UltravoxSessionStatus.THINKING ? 'Thinking' :
+    status === UltravoxSessionStatus.LISTENING ? 'Listening' : 'Live';
 
   return (
     <div className={`fixed z-[100] transition-all duration-500 ease-in-out ${
@@ -193,7 +184,7 @@ export default function UltravoxCall({ onClose }: UltravoxCallProps) {
             <h2 className="text-xl font-bold tracking-tight text-foreground">Ultravox AI</h2>
             <div className="flex items-center justify-center gap-2">
               <span className={`text-[10px] font-bold uppercase tracking-widest px-2 py-0.5 rounded-md ${isLive ? 'bg-green-500/10 text-green-500' : 'bg-muted text-muted-foreground'}`}>
-                {isConnecting ? 'Secure Line' : isLive ? 'Live' : 'Disconnected'}
+                {isConnecting ? 'Connecting…' : isLive ? liveStatusLabel : 'Disconnected'}
               </span>
               {isLive && <span className="text-[10px] text-muted-foreground font-medium flex items-center gap-1"><Signal className="w-3 h-3" /> Encrypted</span>}
             </div>

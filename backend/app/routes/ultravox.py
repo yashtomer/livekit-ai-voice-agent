@@ -10,7 +10,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
 from ..models.api_key import UserAPIKey
-from ..models.user import User
+from ..models.user import User, UserRole
 from ..services.encryption import decrypt_key
 from .auth import get_current_user
 
@@ -57,6 +57,15 @@ async def create_web_call(
         )
         api_key_entry = result.scalar_one_or_none()
         api_key = decrypt_key(api_key_entry.encrypted_key) if api_key_entry else None
+
+        # Fall back to server env var only for admins — matches token_route behaviour
+        if not api_key and user.role == UserRole.admin:
+            api_key = ULTRAVOX_API_KEY
+
+        if not api_key:
+            raise ValueError(
+                "No Ultravox API key configured. Add one via the configuration panel."
+            )
 
         uv_call = await create_ultravox_call(medium={"webRtc": {}}, api_key=api_key)
         return {"joinUrl": uv_call["joinUrl"]}
