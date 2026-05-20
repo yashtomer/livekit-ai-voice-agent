@@ -664,16 +664,20 @@ def build_llm(cfg: dict):
         )
 
     if provider == "google":
+        # Native LiveKit Google plugin (google-genai under the hood). Avoids
+        # the OpenAI-compat shim, which intermittently 400s with
+        # "GenerateContentRequest.contents: contents is not specified" when
+        # the chat history starts with a system role only.
+        from livekit.plugins import google as google_plugin
         api_key = cfg.get("api_key") or os.environ.get("GOOGLE_API_KEY")
         if not api_key:
             raise RuntimeError("GOOGLE_API_KEY not configured")
-        return openai.LLM(
+        return google_plugin.LLM(
             model=model,
-            base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
             api_key=api_key,
             temperature=temperature,
             top_p=top_p,
-            max_completion_tokens=max_tokens,
+            max_output_tokens=max_tokens,
         )
 
     if provider == "deepseek":
@@ -932,6 +936,7 @@ async def entrypoint(ctx: JobContext):
     turn_handling = TurnHandlingOptions(
         endpointing=EndpointingOptions(mode="dynamic", min_delay=0.2, max_delay=3.0),
         interruption=InterruptionOptions(min_words=3, min_duration=0.6),
+        preemptive_generation={"enabled": True},
         **({"turn_detection": turn_model} if turn_model is not None else {}),
     )
 
@@ -941,7 +946,6 @@ async def entrypoint(ctx: JobContext):
         tts=tts,
         vad=ctx.proc.userdata["vad"],
         turn_handling=turn_handling,
-        preemptive_generation=True,
     )
 
     # ─── Real-time metrics via LiveKit's built-in metrics_collected event ───
