@@ -492,9 +492,9 @@ export default function Dashboard() {
                 </h3>
                 <div className="flex flex-col items-center gap-2 p-4 bg-green-500/5 rounded-xl border border-green-500/10">
                   <p className="text-sm font-medium text-foreground">Call our Ultravox Healthcare Agent</p>
-                  <p className="text-xl font-bold text-green-600 dark:text-green-400 tracking-tight">+1 555 1593204</p>
+                  <p className="text-xl font-bold text-green-600 dark:text-green-400 tracking-tight">{import.meta.env.VITE_WHATSAPP_NUMBER || '+1 555 1593204'}</p>
                   <p className="text-xs text-muted-foreground text-center leading-relaxed mb-2">
-                    Write or call this number on WhatsApp to connect with our Ultravox Healthcare agent directly.
+                    Call this number on WhatsApp to connect with our Ultravox Healthcare agent directly.
                   </p>
                   <button 
                     onClick={() => setShowUltravox(true)}
