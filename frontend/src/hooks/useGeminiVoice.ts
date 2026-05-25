@@ -24,9 +24,10 @@ function getWsUrl(): string {
   return `${proto}//${window.location.hostname}:8000/gemini/ws${tokenParam}`
 }
 
-function int16ToFloat32(buf: ArrayBuffer): Float32Array {
+function int16ToFloat32(buf: ArrayBuffer) {
   const i16 = new Int16Array(buf)
-  const f32 = new Float32Array(i16.length)
+  const ab = new ArrayBuffer(i16.length * Float32Array.BYTES_PER_ELEMENT)
+  const f32 = new Float32Array(ab)
   for (let i = 0; i < i16.length; i++) {
     f32[i] = i16[i] / (i16[i] < 0 ? 32768 : 32767)
   }
