@@ -12,6 +12,10 @@ Compare STT, LLM, and TTS providers side-by-side, estimate monthly infrastructur
 
 - **Multi-provider voice pipeline** — mix and match STT, LLM, and TTS from different providers per call.
 - **Live voice calls** — real WebRTC calls via LiveKit with mute, timer, and auto-disconnect.
+- **Ultravox browser calling** — one-click AI voice call from the dashboard using the Ultravox WebRTC SDK.
+- **WhatsApp AI calling** — incoming WhatsApp calls answered automatically by an Ultravox AI agent (FastAPI bridge).
+- **Gemini Live browser calling** — full-duplex voice calls directly in the browser using Google's Gemini Live API (PCM16 / AudioWorklet, barge-in supported).
+- **Gemini × Twilio phone bridge** — dial a real phone number and speak with a Gemini Live AI agent via Twilio Media Streams.
 - **Real-time metrics** — STT / LLM / TTS latency, TTFT, tokens/sec, and traffic-light quality dots after each turn.
 - **Smart cost estimator** — auto-picks AWS or GCP server tier based on each model's `compute_profile`; concurrency-aware (`ceil(agents / capacity)`); editable traffic baselines (LLM tokens/hr, TTS chars/hr).
 - **Per-user usage quotas** — admin-tunable concurrent + daily call limits prevent vendor-bill leakage.
@@ -47,8 +51,12 @@ Host
        │
        ├─ Browser ─► frontend (nginx, ${FRONTEND_PORT}) ──► HTTPS via Apache
        │
-       ├─ REST/JWT ─► backend (FastAPI, ${BACKEND_PORT}) ─► PostgreSQL (host)
+       ├─ REST/JWT ─► backend (FastAPI, network_mode: host, port 8000)
        │                       │
+       │                       ├─ /gemini/ws   ─► Google Gemini Live API (v1alpha)
+       │                       ├─ /twilio/voice  ─► TwiML webhook for Twilio
+       │                       ├─ /twilio/stream ─► Twilio Media Streams WS bridge
+       │                       ├─ /whatsapp/*    ─► WhatsApp + Ultravox bridge
        │                       └─ joins voice-shared ──► livekit:7880
        │
        ├─ agent worker ─ joins voice-shared ─► livekit:7880
@@ -59,11 +67,34 @@ Host
             ▲ no host ports — reached over the docker network by service name
 ```
 
-**Call flow:**
+**LiveKit call flow:**
 1. Browser requests a token from the FastAPI backend (selected model config embedded in metadata).
 2. Backend signs a token whose URL is `LIVEKIT_PUBLIC_URL` (the WSS Apache exposes); browser connects there.
 3. Agent worker picks up the room (signaling over `LIVEKIT_URL=ws://livekit:7880` on the shared docker network), reads metadata, and builds the STT → LLM → TTS pipeline.
 4. Real-time transcript + per-stage latency metrics are sent back to the browser via LiveKit data messages.
+
+**Ultravox browser call flow:**
+1. Browser calls `POST /api/ultravox/create-web-call` on the FastAPI backend.
+2. Backend calls the Ultravox API and returns a `joinUrl`.
+3. Browser connects directly to Ultravox via the `ultravox-client` SDK (WebRTC, no server relay needed).
+
+**Gemini Live browser call flow:**
+1. Browser opens a WebSocket to `GET /gemini/ws?token=<jwt>`.
+2. Backend decodes the JWT, looks up the user's encrypted Google API key (`UserAPIKey` table, `provider=google`). Admins fall back to the server `GOOGLE_API_KEY` if no personal key is set; regular users without a key get an immediate `no_api_key` error.
+3. Backend connects to Google Gemini Live (`gemini-3.1-flash-live-preview`, `v1alpha`) and relays PCM16 audio both ways.
+4. Browser uses an AudioWorklet for zero-latency mic capture (Float32 → Int16 @ 16 kHz) and a dual AudioContext for playback (24 kHz).
+
+**Gemini × Twilio phone bridge flow:**
+1. Someone calls your Twilio phone number → Twilio hits `POST /twilio/voice` (TwiML webhook).
+2. Backend returns `<Connect><Stream url="wss://{PUBLIC_HOST}/twilio/stream" />` TwiML.
+3. Twilio opens a Media Stream WebSocket to `/twilio/stream`; backend transcodes μ-law 8 kHz ↔ PCM16 16 kHz via `audioop` and streams to Gemini Live.
+4. For browser-to-phone dialling: browser calls `GET /twilio/token` to get a Twilio Voice SDK JWT, then uses the `@twilio/voice-sdk` `Device` to place a call.
+
+**WhatsApp call flow:**
+1. User calls the WhatsApp Business number.
+2. Meta sends a `connect` webhook event (with WebRTC SDP offer) to `POST /whatsapp/call-events` on the FastAPI backend.
+3. Backend creates an Ultravox session, sets up WebRTC with Meta via `aiortc`, and bridges audio both ways.
+4. On hangup, Meta sends a `terminate` event and the backend cleans up.
 
 **Database:** PostgreSQL runs on the host (not in Docker) so DB lifecycle is decoupled from `docker compose`. Backend reaches it via `host.docker.internal`.
 
@@ -170,6 +201,149 @@ Open **http://localhost:3000**
 
 ---
 
+## Ultravox Setup
+
+### Browser calling
+
+1. Add your Ultravox API key in the dashboard **Config** modal under the `ultravox` provider.
+2. Click the **Ultravox** button in the top nav — the backend creates a session and the browser connects directly via the Ultravox WebRTC SDK.
+
+No extra config needed; the `/api/ultravox/create-web-call` endpoint is always available.
+
+### WhatsApp AI calling
+
+#### Prerequisites
+
+- A **WhatsApp Business** account with Calling API access (apply via Meta Business Suite).
+- An **Ultravox API key** (add to `.env` as `ULTRAVOX_API_KEY`).
+- A publicly reachable HTTPS URL for the webhook (ngrok for local dev, Apache for production).
+- The backend must run with `network_mode: host` (already configured in `docker-compose-dev.yml`) so the WebRTC STUN stack can discover the real public IP.
+
+#### Required `.env` variables
+
+```env
+ULTRAVOX_API_KEY=uv-...
+PHONE_NUMBER_ID=<your Meta phone number ID>
+ACCESS_TOKEN=<your Meta permanent access token>
+META_VERIFY_TOKEN=<any secret string you choose>
+```
+
+#### Local development with ngrok
+
+```bash
+# Start the stack
+docker compose -f docker-compose-dev.yml up -d
+
+# Expose the backend (WhatsApp webhook handler is part of FastAPI on port 8000)
+ngrok http 8000
+```
+
+Copy the ngrok HTTPS URL (e.g. `https://abc123.ngrok.io`).
+
+#### Meta webhook configuration
+
+1. Go to **Meta Developer Console** → your app → **WhatsApp** → **Configuration**.
+2. Under **Webhook**, click **Edit**:
+   - **Callback URL**: `https://abc123.ngrok.io/whatsapp/call-events`
+   - **Verify token**: the value you set as `META_VERIFY_TOKEN` in `.env`
+3. Click **Verify and Save** — Meta will send a GET request to confirm the token.
+4. Under **Webhook Fields**, subscribe to **calls**.
+
+Call your WhatsApp Business number — the AI agent will answer automatically.
+
+---
+
+## Gemini Live Voice
+
+The **Gemini** page (`/gemini`) offers two calling modes powered by Google's Gemini Live API:
+
+- **Browser Voice** — mic audio streams directly from your browser to Gemini Live over a FastAPI WebSocket. No phone or Twilio account needed.
+- **Phone Bridge** — dial a real Twilio phone number; audio is bridged Twilio Media Streams ↔ Gemini Live by the backend.
+
+### Google API key
+
+Each logged-in user needs a **Google (Gemini) API key** added in **Config → Google (Gemini)**.
+
+- Admins without a personal key fall back to the server-level `GOOGLE_API_KEY` from `.env`.
+- Regular users without a configured key see a banner: *"Google (Gemini) API key not configured"* with a direct link to Config.
+
+**To obtain a key:** visit [Google AI Studio](https://aistudio.google.com/apikey) and create an API key for the Gemini API.
+
+### Browser Voice — quick start
+
+1. Navigate to **Gemini** in the top nav.
+2. Select **Browser Voice** mode.
+3. (Optional) Choose a prompt template or write a custom system prompt, and pick a language.
+4. Click **Start Speaking** — allow microphone access when prompted.
+5. Talk naturally; click **End Call** to stop.
+
+No extra `.env` variables required beyond `GOOGLE_API_KEY` (or the per-user key in Config).
+
+### Phone Bridge (Twilio) — setup
+
+#### Prerequisites
+
+- A **Twilio account** with a phone number.
+- A **TwiML Application** in Twilio console (for browser-based outbound calling).
+- Your backend reachable over HTTPS (ngrok for local dev).
+
+#### Required `.env` variables
+
+```env
+# Google
+GOOGLE_API_KEY=AIza...            # server-level fallback for admins
+
+# Twilio
+TWILIO_ACCOUNT_SID=AC...
+TWILIO_API_KEY=SK...              # Twilio API Key SID (not account SID)
+TWILIO_API_SECRET=<api-key-secret>
+TWILIO_TWIML_APP_SID=AP...        # TwiML Application SID
+
+# Where the Twilio webhook can reach your backend
+PUBLIC_HOST=api.example.com       # hostname only, no https:// prefix
+
+# Optional — override the language Gemini responds in for phone calls
+PHONE_LANGUAGE=en                 # default: en
+```
+
+#### Step 1 — Expose the backend publicly
+
+```bash
+# Start the stack
+docker compose -f docker-compose-dev.yml up -d
+
+# Expose port 8000 via ngrok (needed for Twilio webhook + Media Streams)
+ngrok http 8000
+```
+
+Note your ngrok URL, e.g. `https://abc123.ngrok.io`. Set `PUBLIC_HOST=abc123.ngrok.io` in `.env`.
+
+#### Step 2 — Configure Twilio
+
+1. **Phone number → Voice webhook**
+   - In Twilio Console go to **Phone Numbers** → select your number → **Voice & Fax**.
+   - Set **A call comes in** → **Webhook** → `https://abc123.ngrok.io/twilio/voice` (HTTP POST).
+   - Save.
+
+2. **TwiML Application** (for browser outbound dialling)
+   - Go to **Voice** → **TwiML Apps** → **Create new TwiML App**.
+   - **Voice Request URL**: `https://abc123.ngrok.io/twilio/voice` (HTTP POST).
+   - Save and copy the **Application SID** (`AP…`) → set as `TWILIO_TWIML_APP_SID` in `.env`.
+
+3. **API Key** (for signing browser tokens)
+   - Go to **Account** → **API keys & tokens** → **Create API key**.
+   - Copy the **SID** (`SK…`) and **Secret** → set as `TWILIO_API_KEY` / `TWILIO_API_SECRET`.
+
+#### Step 3 — Use the Phone Bridge
+
+1. Navigate to **Gemini** → select **Phone Bridge** mode.
+2. Click **Call Healthcare Agent** — your browser will connect via the Twilio Voice SDK.
+3. Speak; the backend bridges audio to Gemini Live in real time.
+
+> **Incoming call test:** Call the Twilio number from any phone. The Gemini agent answers immediately.
+
+---
+
 ## Environment Variables
 
 Copy `.env.example` to `.env` and fill in the keys for the providers you want to use.
@@ -220,6 +394,29 @@ GOOGLE_API_KEY=
 DEEPGRAM_API_KEY=
 ELEVENLABS_API_KEY=
 DEEPSEEK_API_KEY=
+
+# ─── Ultravox (browser + WhatsApp calling) ───────────────────────────
+ULTRAVOX_API_KEY=uv-...
+
+# ─── WhatsApp Business (Meta) ────────────────────────────────────────
+# Required only if you want AI to answer WhatsApp calls.
+PHONE_NUMBER_ID=              # Meta phone number ID
+ACCESS_TOKEN=                 # Meta permanent system user access token
+META_VERIFY_TOKEN=            # Any secret string — must match Meta webhook config
+
+# ─── Gemini Live Voice ───────────────────────────────────────────────
+# GOOGLE_API_KEY is the server-level key used by admins (and the Twilio
+# phone bridge). Regular users supply their own key via Config → Google (Gemini).
+GOOGLE_API_KEY=AIza...
+
+# ─── Twilio phone bridge (Gemini × Twilio) ───────────────────────────
+# Required only if you want the Twilio Phone Bridge on the Gemini page.
+TWILIO_ACCOUNT_SID=AC...
+TWILIO_API_KEY=SK...          # Twilio API Key SID (not the Account SID)
+TWILIO_API_SECRET=            # Secret for the API Key above
+TWILIO_TWIML_APP_SID=AP...    # TwiML Application SID (voice request URL = /twilio/voice)
+PUBLIC_HOST=api.example.com   # Hostname only (no https://); used in the TwiML Stream URL
+PHONE_LANGUAGE=en             # Language for Gemini phone agent (default: en)
 ```
 
 Generate keys:
@@ -242,12 +439,15 @@ internally over the `voice-shared` / default docker networks by service name.
 |---|---|---|---|
 | Frontend (nginx) | 80 | `${HOST_BIND}:${FRONTEND_PORT}` | `FRONTEND_PORT` |
 | Backend (FastAPI) | 8000 | `${HOST_BIND}:${BACKEND_PORT}` | `BACKEND_PORT` |
+| WhatsApp bridge (Node.js) | 3001 | host port 3001 (`network_mode: host`) | `WHATSAPP_BRIDGE_PORT` |
 | Voicebox (optional) | 17493 | `${HOST_BIND}:${VOICEBOX_PORT}` | `VOICEBOX_PORT` |
 | Whisper tiny / base / small | 8000 | *internal only* | — |
 | Whisper multi (base / small) | 8000 | *internal only* | — |
 | Piper TTS | 8000 | *internal only* | — |
 | LiveKit signal / RTC TCP / RTC UDP | 7880 / 7881 / 7882 | published by `~/infra/livekit/` | (separate stack) |
 | PostgreSQL | 5432 | host (not Docker) | `POSTGRES_PORT` |
+
+> `whatsapp-bridge` uses `network_mode: host` so that the Node.js WebRTC stack can resolve the host's real public IP via STUN. Docker's NAT hides the public IP from STUN, causing Meta to reject the SDP — host networking bypasses this.
 
 > Whisper, Piper, and (when not exposed) Voicebox are only reachable via
 > docker DNS names like `http://whisper-base:8000` or `http://tts:8000`
@@ -273,6 +473,45 @@ The third vhost is the WSS endpoint clients use for `LIVEKIT_PUBLIC_URL`.
 **LiveKit's UDP media port (7882) cannot be proxied** — open it directly
 on the host firewall.
 
+### Webhook routes via Apache
+
+The backend runs with `network_mode: host` on port 8000. All webhook handlers (`/whatsapp/*`, `/twilio/voice`, `/twilio/stream`) are part of the FastAPI backend — no separate service needed. Apache proxies them from the public HTTPS domain:
+
+```apache
+# Inside your api.example.com VirtualHost (or a dedicated vhost)
+
+# FastAPI REST + WebSocket (covers /gemini/ws, /twilio/stream, /whatsapp/*, etc.)
+ProxyPass        /  http://127.0.0.1:8000/
+ProxyPassReverse /  http://127.0.0.1:8000/
+
+# WebSocket upgrade (required for Gemini WS + Twilio Media Streams)
+RewriteEngine On
+RewriteCond %{HTTP:Upgrade} websocket [NC]
+RewriteCond %{HTTP:Connection} upgrade [NC]
+RewriteRule ^/?(.*) ws://127.0.0.1:8000/$1 [P,L]
+```
+
+#### Meta (WhatsApp) webhook
+
+Set Meta's **Callback URL** to:
+```
+https://api.example.com/whatsapp/call-events
+```
+Set **Verify token** to the value of `META_VERIFY_TOKEN` in `.env`.
+
+#### Twilio webhook
+
+In Twilio Console → your phone number → **Voice & Fax**:
+
+| Field | Value |
+|---|---|
+| A call comes in | Webhook — `https://api.example.com/twilio/voice` (HTTP POST) |
+| TwiML App — Voice Request URL | `https://api.example.com/twilio/voice` (HTTP POST) |
+
+Set `PUBLIC_HOST=api.example.com` in `.env` so the TwiML `<Stream>` URL resolves correctly.
+
+No extra firewall rules needed — only Apache (port 443) is exposed publicly.
+
 ---
 
 ## Admin Panel
@@ -292,6 +531,14 @@ Log in as admin to access the **Admin** tab in the top navigation.
 3. Send the customer the URL + their credentials. They can immediately use any FREE local model (Whisper, Piper, Edge, Voicebox, Ollama). To unlock cloud providers, they add their own API keys in the Config modal.
 
 At least one admin account must remain active — the last active admin cannot be disabled.
+
+**Populate model use-case descriptions** (one-time, after first start):
+
+```bash
+docker compose -f docker-compose-dev.yml exec backend uv run python scripts/seed_use_cases.py
+```
+
+This fills the `use_case` column for every seeded model. Once populated, hover over the **ⓘ** icon in the Models table to see what each model is best suited for.
 
 ---
 
@@ -351,7 +598,10 @@ livekit-ai-voice-agent/
 │   │   │   ├── models_route.py  # Customer model catalog (filters by API keys)
 │   │   │   ├── setup_route.py   # Turn-detector model download status
 │   │   │   ├── tts_route.py     # Edge / Voicebox TTS sample
-│   │   │   └── fx_route.py      # USD → INR exchange rate
+│   │   │   ├── fx_route.py      # USD → INR exchange rate
+│   │   │   ├── gemini_call.py   # Gemini Live browser WS (/gemini/ws) + JWT auth
+│   │   │   ├── twilio_bridge.py # Twilio TwiML webhook + Media Stream WS bridge
+│   │   │   └── whatsapp.py      # WhatsApp ↔ Ultravox bridge (FastAPI, aiortc)
 │   │   └── services/
 │   │       ├── auth.py          # JWT + bcrypt
 │   │       ├── encryption.py    # Fernet API key encryption
@@ -360,8 +610,14 @@ livekit-ai-voice-agent/
 │   │       └── model_sync.py    # Reconciles dynamic Ollama / Voicebox models
 │   └── agent.py                 # LiveKit agent worker (warmups + JIT loaders)
 ├── frontend/
+│   ├── public/
+│   │   └── audio-capture-worklet.js  # AudioWorklet: Float32→Int16 mic capture
 │   └── src/
-│       ├── pages/Dashboard.tsx
+│       ├── pages/
+│       │   ├── Dashboard.tsx
+│       │   └── GeminiPage.tsx   # Gemini Live full page (browser + phone bridge)
+│       ├── hooks/
+│       │   └── useGeminiVoice.ts  # WS audio hook (PCM16, barge-in, transcript)
 │       ├── components/
 │       │   ├── AdminPanel/      # Admin tabs (models / users / settings / logs)
 │       │   ├── CallInterface/   # WebRTC call controls + setup-ready modal
@@ -370,10 +626,12 @@ livekit-ai-voice-agent/
 │       │   │                    #   model · editable traffic baselines
 │       │   ├── MetricsPanel/    # Live STT/LLM/TTS latency + quality dots
 │       │   ├── TranscriptPanel/ # Conversation transcript
+│       │   ├── UltravoxCall/    # Ultravox browser call popup
 │       │   └── LoginPage/
-│       └── store/               # Zustand: auth · call · models
+│       └── store/               # Zustand: auth · call · models · ui
 ├── voicebox/                    # Optional local TTS engine (profile: voicebox)
-├── docker-compose.yml           # project: ai-voice-cost-calc; no postgres, no livekit
+├── docker-compose.yml           # Production compose
+├── docker-compose-dev.yml       # Dev compose (hot-reload, network_mode: host)
 └── .env                         # Secrets, ports, DB connection, API keys
 ```
 
@@ -396,6 +654,16 @@ livekit-ai-voice-agent/
 | `429 Concurrent-call limit reached` | The customer hit their quota — bump it in Admin → Settings, or wait for active calls to finish. |
 | Turn-detector model missing | Backend auto-downloads on startup. If it failed (no internet at first start), open Admin → check the setup endpoint. |
 | `Ollama unreachable` warning | Normal if Ollama is not installed — local LLM models won't appear. |
+| WhatsApp webhook verify fails | Ensure `META_VERIFY_TOKEN` in `.env` matches exactly what you entered in Meta's webhook config. Check `docker compose logs backend`. |
+| WhatsApp call rings but agent doesn't answer | Check backend logs for `pre_accept` errors. Confirm `PHONE_NUMBER_ID` and `ACCESS_TOKEN` are set correctly in `.env`. |
 | FX rate not showing | Frankfurter API unreachable — badge is hidden automatically. |
 | Last admin can't be disabled | By design — activate another admin account first. |
 | Re-seeding clobbered an admin price edit | Won't happen: rows admins have edited get `is_seed=false` and are skipped by the reseed reconcile. Click "Reset to seed" on a row to re-adopt the seed default. |
+| **Gemini page shows "API key not configured"** | User has no Google key in Config. Open **Config → Google (Gemini)** and add an API key from [Google AI Studio](https://aistudio.google.com/apikey). Admins can also set `GOOGLE_API_KEY` in `.env` as a server-level fallback. |
+| Gemini WS connects then immediately disconnects | Wrong model or API version. The backend uses `gemini-3.1-flash-live-preview` on `v1alpha` — these are already hardcoded; no user action needed. If you see a `1008` close code, check that the API key has access to the Live API (requires Gemini API enabled in Google Cloud). |
+| Gemini: no audio heard / mic not working | Browser must be served over HTTPS (or localhost) for `getUserMedia` to work. If testing on a remote server without HTTPS, use ngrok or add a self-signed cert. |
+| Gemini barge-in / interruption not working | VAD config is already tuned (`START_SENSITIVITY_HIGH`, `silence_duration_ms=100`). If still sluggish, check your browser's mic sample rate — the worklet re-samples to 16 kHz internally. |
+| **Twilio: `/twilio/token` returns 500** | One or more Twilio env vars missing. Ensure `TWILIO_ACCOUNT_SID`, `TWILIO_API_KEY`, `TWILIO_API_SECRET`, and `TWILIO_TWIML_APP_SID` are all set in `.env` and the container was restarted after editing. |
+| Twilio call connects then drops immediately | Check that `PUBLIC_HOST` is set to your public hostname (no `https://` prefix) and that the TwiML App's **Voice Request URL** points to `https://<PUBLIC_HOST>/twilio/voice`. |
+| Twilio Media Stream connects but no Gemini audio | Confirm `GOOGLE_API_KEY` is set in `.env`. The phone bridge always uses the server key — it does not look up per-user keys. |
+| ngrok URL changed — Twilio webhook broken | Update the **Voice Request URL** in Twilio Console and the `PUBLIC_HOST` in `.env`, then restart the backend container (`docker compose restart backend`). |

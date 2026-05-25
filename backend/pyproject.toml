@@ -30,6 +30,12 @@ dependencies = [
     "livekit-plugins-google~=1.5",
     # TTS plugins
     "edge-tts>=7.0",
+    # WhatsApp ↔ Ultravox WebRTC bridge
+    "aiortc>=1.9",
+    "websockets>=12.0",
+    # Gemini Live voice bridge + Twilio phone bridge
+    "google-genai>=1.0",
+    "twilio>=9.0",
     # Constraints
     "numpy<2",
     "onnxruntime<1.24",

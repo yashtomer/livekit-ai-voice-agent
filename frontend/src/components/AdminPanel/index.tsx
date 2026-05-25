@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react'
 import {
   Shield, RefreshCw, ToggleLeft, ToggleRight, Trash2,
   Loader, Check, UserPlus, X,
-  Terminal, Pencil, ChevronDown, ChevronUp, Search, RotateCcw, AlertTriangle,
+  Terminal, Pencil, ChevronDown, ChevronUp, Search, RotateCcw, AlertTriangle, Info,
 } from 'lucide-react'
 import { useQuery, useMutation, useQueryClient } from '@tanstack/react-query'
 import api from '../../api/client'
@@ -17,6 +17,7 @@ interface ModelEntry {
   label: string; price_per_hour: number; enabled: boolean
   compute_profile?: ComputeProfile
   min_vram_gb?: number | null
+  use_case?: string | null
   is_seed?: boolean
 }
 
@@ -91,13 +92,15 @@ const TYPE_COLOR: Record<string, string> = {
   tts: 'text-green-600 dark:text-green-400 bg-green-50 dark:bg-green-950/30 border border-green-200 dark:border-green-800',
 }
 
-function ModelRow({ model, onToggle, onDelete, onLabelSave, onPatch, onResetToSeed }: {
+function ModelRow({ model, onToggle, onDelete, onLabelSave, onPatch, onResetToSeed, onShowUseCase, onHideUseCase }: {
   model: ModelEntry
   onToggle: (id: number, enabled: boolean) => void
   onDelete: (id: number) => void
   onLabelSave: (id: number, label: string) => void
   onPatch: (id: number, patch: Partial<Pick<ModelEntry, 'price_per_hour' | 'compute_profile' | 'min_vram_gb'>>) => void
   onResetToSeed: (id: number) => void
+  onShowUseCase: (text: string, e: React.MouseEvent) => void
+  onHideUseCase: () => void
 }) {
   const [editing, setEditing] = useState(false)
   const [draft, setDraft] = useState(model.label)
@@ -205,6 +208,17 @@ function ModelRow({ model, onToggle, onDelete, onLabelSave, onPatch, onResetToSe
         </button>
       </td>
       <td className="px-3 py-2.5">
+        {model.use_case ? (
+          <Info
+            className="w-3.5 h-3.5 text-muted-foreground/50 hover:text-primary transition-colors cursor-help"
+            onMouseEnter={(e) => onShowUseCase(model.use_case!, e)}
+            onMouseLeave={onHideUseCase}
+          />
+        ) : (
+          <Info className="w-3.5 h-3.5 text-muted-foreground/20" />
+        )}
+      </td>
+      <td className="px-3 py-2.5">
         <div className="flex items-center gap-2">
           {model.is_seed === false && (
             <button
@@ -254,6 +268,7 @@ export default function AdminPanel() {
   const [logPolling, setLogPolling] = useState(false)
   const logEndRef = useRef<HTMLDivElement>(null)
   const logIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const [useCaseTooltip, setUseCaseTooltip] = useState<{ x: number; y: number; text: string } | null>(null)
 
   const { data: models = [], isLoading: loadingModels } = useQuery<ModelEntry[]>({
     queryKey: ['admin-models'],
@@ -733,13 +748,14 @@ export default function AdminPanel() {
                     <SortHeader label="Price" sortKey="price" sortConfig={sortConfig} onSort={handleSort} />
                     <th className="px-3 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide">Profile</th>
                     <th className="px-3 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide">Active</th>
+                    <th className="px-3 py-2.5 text-xs font-semibold text-muted-foreground uppercase tracking-wide">Info</th>
                     <th className="px-3 py-2.5" />
                   </tr>
                 </thead>
                 <tbody>
                   {filteredModels.length === 0 ? (
                     <tr>
-                      <td colSpan={8} className="px-3 py-10 text-center text-sm text-muted-foreground">No models match your search</td>
+                      <td colSpan={9} className="px-3 py-10 text-center text-sm text-muted-foreground">No models match your search</td>
                     </tr>
                   ) : (
                     filteredModels.map((m) => (
@@ -750,6 +766,11 @@ export default function AdminPanel() {
                         onLabelSave={(id, label) => updateModelLabel.mutate({ id, label })}
                         onPatch={(id, patch) => patchModel.mutate({ id, patch })}
                         onResetToSeed={(id) => resetToSeed.mutate(id)}
+                        onShowUseCase={(text, e) => {
+                          const rect = (e.currentTarget as HTMLElement).getBoundingClientRect()
+                          setUseCaseTooltip({ x: rect.left, y: rect.top, text })
+                        }}
+                        onHideUseCase={() => setUseCaseTooltip(null)}
                       />
                     ))
                   )}
@@ -940,6 +961,20 @@ export default function AdminPanel() {
             )}
             <div ref={logEndRef} />
           </div>
+        </div>
+      )}
+
+      {useCaseTooltip && (
+        <div
+          className="fixed z-[9999] w-72 rounded-lg border border-border bg-white dark:bg-zinc-900 shadow-xl p-3 text-xs leading-relaxed pointer-events-none"
+          style={{
+            left: Math.min(useCaseTooltip.x, window.innerWidth - 300),
+            top: useCaseTooltip.y - 8,
+            transform: 'translateY(-100%)',
+          }}
+        >
+          <p className="font-semibold text-foreground mb-1.5">Use Case</p>
+          <p className="text-muted-foreground">{useCaseTooltip.text}</p>
         </div>
       )}
     </div>

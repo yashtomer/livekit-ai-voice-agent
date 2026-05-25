@@ -1,12 +1,13 @@
 import { useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
-  LayoutDashboard, Shield, Settings, LogOut, ChevronDown, User, Sun, Moon,
+  LayoutDashboard, Shield, Settings, LogOut, ChevronDown, User, Sun, Moon, Phone,
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useUIStore } from '../../store/uiStore'
 import { useTheme } from '../../lib/theme'
 import ConfigModal from '../ConfigModal'
+import UltravoxCall from '../UltravoxCall'
 
 interface LayoutProps {
   children: React.ReactNode
@@ -24,6 +25,7 @@ export default function Layout({ children }: LayoutProps) {
     closeConfigModal,
   } = useUIStore()
   const [showUserMenu, setShowUserMenu] = useState(false)
+  const [isUltravoxCallOpen, setIsUltravoxCallOpen] = useState(false)
 
   const handleLogout = () => {
     logout()
@@ -34,6 +36,7 @@ export default function Layout({ children }: LayoutProps) {
     { to: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
     ...(isAdmin() ? [{ to: '/admin', label: 'Admin', icon: Shield }] : []),
   ]
+
 
   return (
     <div className="min-h-screen bg-background flex flex-col">
@@ -66,6 +69,23 @@ export default function Layout({ children }: LayoutProps) {
                 <span className="hidden sm:block">{label}</span>
               </Link>
             ))}
+            <button
+              onClick={() => setIsUltravoxCallOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-muted transition-all"
+            >
+              <Phone className="w-3.5 h-3.5" />
+              <span className="hidden sm:block">Ultravox</span>
+            </button>
+            <Link
+              to="/gemini"
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
+                location.pathname === '/gemini'
+                  ? 'bg-primary text-primary-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-muted'
+              }`}
+            >
+              <span className="hidden sm:block">Gemini</span>
+            </Link>
           </nav>
 
           {/* Right actions */}
@@ -132,6 +152,7 @@ export default function Layout({ children }: LayoutProps) {
                 </>
               )}
             </div>
+
           </div>
         </div>
       </header>
@@ -145,6 +166,11 @@ export default function Layout({ children }: LayoutProps) {
           highlightProvider={configModalHighlightProvider}
         />
       )}
+
+      {isUltravoxCallOpen && (
+        <UltravoxCall onClose={() => setIsUltravoxCallOpen(false)} />
+      )}
+
     </div>
   )
 }

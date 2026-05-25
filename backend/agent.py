@@ -235,6 +235,7 @@ class ElevenLabsTTS(tts_base.TTS):
         api_key: str,
         stability: float = 0.5,
         similarity_boost: float = 0.75,
+        style: float = 0.0,
     ):
         super().__init__(
             capabilities=tts_base.TTSCapabilities(streaming=False),
@@ -245,6 +246,7 @@ class ElevenLabsTTS(tts_base.TTS):
         self._model = model
         self._stability = stability
         self._similarity_boost = similarity_boost
+        self._style = style
         self._client = httpx.AsyncClient(
             base_url="https://api.elevenlabs.io/v1",
             headers={"xi-api-key": api_key, "accept": "audio/mpeg"},
@@ -270,6 +272,8 @@ class ElevenLabsTTSStream(tts_base.ChunkedStream):
                     "voice_settings": {
                         "stability": self._el_tts._stability,
                         "similarity_boost": self._el_tts._similarity_boost,
+                        "style": self._el_tts._style,
+                        "use_speaker_boost": True,
                     },
                 },
             )
@@ -611,14 +615,18 @@ def build_llm(cfg: dict):
     """Build an LLM instance from config dict."""
     provider = cfg.get("provider", "ollama")
     model = cfg.get("model", "qwen2.5:3b")
+    temperature = float(cfg.get("temperature", 0.6))
+    top_p = float(cfg.get("top_p", 1.0))
+    max_tokens = int(cfg.get("max_tokens", LLM_MAX_TOKENS))
 
     if provider == "ollama":
         return openai.LLM(
             model=model,
             base_url=OLLAMA_BASE_URL,
             api_key="ollama",
-            temperature=0.6,
-            max_completion_tokens=LLM_MAX_TOKENS,
+            temperature=temperature,
+            top_p=top_p,
+            max_completion_tokens=max_tokens,
             extra_body={"keep_alive": LLM_KEEP_ALIVE},
             timeout=httpx.Timeout(connect=5, read=60, write=5, pool=5),
         )
@@ -631,8 +639,9 @@ def build_llm(cfg: dict):
             model=model,
             base_url="https://api.groq.com/openai/v1",
             api_key=api_key,
-            temperature=0.6,
-            max_completion_tokens=LLM_MAX_TOKENS,
+            temperature=temperature,
+            top_p=top_p,
+            max_completion_tokens=max_tokens,
         )
 
     if provider == "anthropic":
@@ -640,7 +649,7 @@ def build_llm(cfg: dict):
         api_key = cfg.get("api_key") or os.environ.get("ANTHROPIC_API_KEY")
         if not api_key:
             raise RuntimeError("ANTHROPIC_API_KEY not configured")
-        return anthropic_plugin.LLM(model=model, api_key=api_key)
+        return anthropic_plugin.LLM(model=model, api_key=api_key, temperature=temperature)
 
     if provider == "openai":
         api_key = cfg.get("api_key") or os.environ.get("OPENAI_API_KEY")
@@ -649,8 +658,9 @@ def build_llm(cfg: dict):
         return openai.LLM(
             model=model,
             api_key=api_key,
-            temperature=0.6,
-            max_completion_tokens=LLM_MAX_TOKENS,
+            temperature=temperature,
+            top_p=top_p,
+            max_completion_tokens=max_tokens,
         )
 
     if provider == "google":
@@ -665,8 +675,9 @@ def build_llm(cfg: dict):
         return google_plugin.LLM(
             model=model,
             api_key=api_key,
-            temperature=0.6,
-            max_output_tokens=LLM_MAX_TOKENS,
+            temperature=temperature,
+            top_p=top_p,
+            max_output_tokens=max_tokens,
         )
 
     if provider == "deepseek":
@@ -677,8 +688,9 @@ def build_llm(cfg: dict):
             model=model,
             base_url="https://api.deepseek.com/v1",
             api_key=api_key,
-            temperature=0.6,
-            max_completion_tokens=LLM_MAX_TOKENS,
+            temperature=temperature,
+            top_p=top_p,
+            max_completion_tokens=max_tokens,
         )
 
     raise ValueError(f"unknown llm provider: {provider}")
@@ -687,12 +699,14 @@ def build_llm(cfg: dict):
 def build_tts(cfg: dict):
     """Build a TTS instance from config dict."""
     provider = cfg.get("provider", "piper_local")
+    speed = float(cfg.get("speed", 1.0))
 
     if provider == "piper_local":
         voice = cfg.get("voice", "alloy")
         return openai.TTS(
             model="tts-1",
             voice=voice,
+            speed=speed,
             base_url=TTS_BASE_URL,
             api_key="local",
         )
@@ -717,6 +731,9 @@ def build_tts(cfg: dict):
             voice_id=cfg.get("voice", "21m00Tcm4TlvDq8ikWAM"),
             model=cfg.get("model", "eleven_flash_v2_5"),
             api_key=api_key,
+            stability=float(cfg.get("stability", 0.5)),
+            similarity_boost=float(cfg.get("clarity", 0.75)),
+            style=float(cfg.get("style_exaggeration", 0.0)),
         )
 
     if provider == "openai":
@@ -726,6 +743,7 @@ def build_tts(cfg: dict):
         return openai.TTS(
             model=cfg.get("model", "tts-1"),
             voice=cfg.get("voice", "alloy"),
+            speed=speed,
             api_key=api_key,
         )
 
@@ -851,7 +869,10 @@ async def entrypoint(ctx: JobContext):
     cfg = _merge_secrets(public_cfg, secret_cfg)
     logger.info(
         f"Starting session — providers: stt={cfg['stt'].get('provider')} "
-        f"llm={cfg['llm'].get('provider')} tts={cfg['tts'].get('provider')}"
+        f"llm={cfg['llm'].get('provider')} tts={cfg['tts'].get('provider')} | "
+        f"temperature={cfg['llm'].get('temperature')} top_p={cfg['llm'].get('top_p')} "
+        f"max_tokens={cfg['llm'].get('max_tokens')} | "
+        f"tts_speed={cfg['tts'].get('speed')} stability={cfg['tts'].get('stability')}"
     )
 
     # ─── Derive conversation language ───

@@ -13,6 +13,7 @@ router = APIRouter()
 KNOWN_PROVIDERS = [
     "openai", "groq", "anthropic", "google",
     "deepgram", "elevenlabs", "deepseek", "azure",
+    "ultravox",
 ]
 
 

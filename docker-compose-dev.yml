@@ -18,8 +18,8 @@
 #   - agent                   — LiveKit worker
 #
 # Host-facing ports bind to 127.0.0.1 only — Apache fronts them for HTTPS.
-# Whisper/TTS/voicebox stay on the docker network; the backend reaches
-# them by service name. Override host ports via .env if needed.
+# Backend uses network_mode:host (required for WhatsApp WebRTC/STUN).
+# Whisper/TTS/db expose localhost ports so the host-network backend can reach them.
 # ════════════════════════════════════════════════════════════════════
 
 name: ai-voice-cost-calc
@@ -29,6 +29,7 @@ services:
   # ─── Whisper STT containers ───
   whisper-base:
     image: fedirz/faster-whisper-server:latest-cpu
+    ports: ["127.0.0.1:8882:8000"]
     environment:
       - WHISPER__MODEL=Systran/faster-whisper-base.en
       - WHISPER__COMPUTE_TYPE=int8
@@ -38,6 +39,7 @@ services:
 
   whisper-small:
     image: fedirz/faster-whisper-server:latest-cpu
+    ports: ["127.0.0.1:8883:8000"]
     environment:
       - WHISPER__MODEL=Systran/faster-whisper-small.en
       - WHISPER__COMPUTE_TYPE=int8
@@ -47,6 +49,7 @@ services:
 
   whisper-tiny:
     image: fedirz/faster-whisper-server:latest-cpu
+    ports: ["127.0.0.1:8881:8000"]
     environment:
       - WHISPER__MODEL=Systran/faster-whisper-tiny.en
       - WHISPER__COMPUTE_TYPE=int8
@@ -56,6 +59,7 @@ services:
 
   whisper-base-multi:
     image: fedirz/faster-whisper-server:latest-cpu
+    ports: ["127.0.0.1:8884:8000"]
     environment:
       - WHISPER__MODEL=Systran/faster-whisper-base
       - WHISPER__COMPUTE_TYPE=int8
@@ -64,6 +68,7 @@ services:
 
   whisper-small-multi:
     image: fedirz/faster-whisper-server:latest-cpu
+    ports: ["127.0.0.1:8885:8000"]
     environment:
       - WHISPER__MODEL=Systran/faster-whisper-small
       - WHISPER__COMPUTE_TYPE=int8
@@ -73,6 +78,7 @@ services:
   # ─── Piper TTS ───
   tts:
     image: ghcr.io/matatonic/openedai-speech:latest
+    ports: ["127.0.0.1:8886:8000"]
     volumes:
       - tts-voices:/app/voices
     restart: unless-stopped
@@ -104,54 +110,75 @@ services:
           memory: 6G
     restart: unless-stopped
 
-  # ─── Backend (FastAPI; uses host's system-installed PostgreSQL) ───
+  # ─── Backend (FastAPI + WhatsApp/Ultravox WebRTC bridge) ───
+  # network_mode: host is required for the WhatsApp WebRTC bridge — STUN must
+  # discover the real public IP; Docker NAT hides it and Meta rejects the SDP.
+  # All internal services expose localhost ports so the backend can reach them.
   backend:
     build: ./backend
-    ports: ["${HOST_BIND:-127.0.0.1}:${BACKEND_PORT:-8000}:8000"]
+    network_mode: host
     environment:
       - AGENT_NAME=${AGENT_NAME:-cost-calc-agent}
-      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@${POSTGRES_HOST:-host.docker.internal}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-voiceagent}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@localhost:5432/${POSTGRES_DB:-voiceagent}
       - SECRET_KEY=${SECRET_KEY:-dev-secret-key-change-in-production}
       - FERNET_KEY=${FERNET_KEY:-***REMOVED***}
       - INTERNAL_AGENT_SECRET=${INTERNAL_AGENT_SECRET:-dev-internal-agent-secret-change-in-production}
-      # Internal URL: shared LiveKit running on the host (see ~/infra/livekit/).
-      # host.docker.internal resolves to the Docker host via host-gateway below.
-      - LIVEKIT_URL=${LIVEKIT_URL:-ws://livekit:7880}
-      # Public URL handed back to the browser. In production this is the
-      # WSS endpoint Apache proxies (e.g. wss://livekit.aeologic.in).
+      - LIVEKIT_URL=${LIVEKIT_URL:-ws://localhost:7880}
       - LIVEKIT_PUBLIC_URL=${LIVEKIT_PUBLIC_URL:-ws://localhost:7880}
       - LIVEKIT_API_KEY=${LIVEKIT_API_KEY:-devkey}
       - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-secret}
-      - VOICEBOX_URL=http://voicebox:17493
-      - OLLAMA_URL=http://host.docker.internal:11434
-      - PIPER_URL=http://tts:8000/v1
-      - TTS_BASE_URL=http://tts:8000/v1
-      - WHISPER_TINY_URL=http://whisper-tiny:8000/v1
-      - WHISPER_BASE_URL=http://whisper-base:8000/v1
-      - WHISPER_SMALL_URL=http://whisper-small:8000/v1
-      - WHISPER_BASE_MULTI_URL=http://whisper-base-multi:8000/v1
-      - WHISPER_SMALL_MULTI_URL=http://whisper-small-multi:8000/v1
+      - VOICEBOX_URL=http://localhost:17493
+      - OLLAMA_URL=http://localhost:11434
+      - PIPER_URL=http://localhost:8886/v1
+      - TTS_BASE_URL=http://localhost:8886/v1
+      - WHISPER_TINY_URL=http://localhost:8881/v1
+      - WHISPER_BASE_URL=http://localhost:8882/v1
+      - WHISPER_SMALL_URL=http://localhost:8883/v1
+      - WHISPER_BASE_MULTI_URL=http://localhost:8884/v1
+      - WHISPER_SMALL_MULTI_URL=http://localhost:8885/v1
       - CORS_ORIGINS=${CORS_ORIGINS:-http://localhost:3000,http://localhost:5173}
       - ADMIN_EMAIL=${ADMIN_EMAIL:-***REMOVED***}
       - ADMIN_PASSWORD=${ADMIN_PASSWORD:-***REMOVED***}
       - HF_HOME=/root/.cache/huggingface
+      # WhatsApp bridge env vars
+      - PHONE_NUMBER_ID=${PHONE_NUMBER_ID}
+      - ACCESS_TOKEN=${ACCESS_TOKEN}
+      - ULTRAVOX_API_KEY=${ULTRAVOX_API_KEY}
+      - META_VERIFY_TOKEN=${META_VERIFY_TOKEN}
+      # Gemini Live + Twilio bridge
+      - GOOGLE_API_KEY=${GOOGLE_API_KEY}
+      - TWILIO_ACCOUNT_SID=${TWILIO_ACCOUNT_SID}
+      - TWILIO_API_KEY=${TWILIO_API_KEY}
+      - TWILIO_API_SECRET=${TWILIO_API_SECRET}
+      - TWILIO_TWIML_APP_SID=${TWILIO_TWIML_APP_SID}
+      - PUBLIC_HOST=${PUBLIC_HOST}
     env_file:
       - path: .env
         required: false
     volumes:
+      - ./backend:/app
+      - /app/.venv
       - livekit-hf-cache:/root/.cache/huggingface
       - quality-data:/data
-    networks:
-      - default
-      - voice-shared
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
+    command: uvicorn app.main:app --host 0.0.0.0 --port 8000 --reload
     restart: unless-stopped
 
   # ─── Frontend (React/Vite → nginx) ───
   frontend:
-    build: ./frontend
-    ports: ["${HOST_BIND:-127.0.0.1}:${FRONTEND_PORT:-3000}:80"]
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.dev
+
+    ports: ["${HOST_BIND:-127.0.0.1}:${FRONTEND_PORT:-3000}:${FRONTEND_PORT:-3000}"]
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    command: npm run dev -- --host 0.0.0.0
+    environment:
+      - VITE_BACKEND_URL=http://host.docker.internal:8000
+      - VITE_WHATSAPP_NUMBER=${WHATSAPP_DISPLAY_NUMBER}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     depends_on:
       - backend
     restart: unless-stopped
@@ -167,7 +194,7 @@ services:
       - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-secret}
       # Server-to-server channel for fetching per-room API keys from the
       # backend so they never travel through the browser/JWT.
-      - BACKEND_INTERNAL_URL=http://backend:8000
+      - BACKEND_INTERNAL_URL=http://host.docker.internal:8000
       - INTERNAL_AGENT_SECRET=${INTERNAL_AGENT_SECRET:-dev-internal-agent-secret-change-in-production}
       - OLLAMA_URL=http://host.docker.internal:11434
       - VOICEBOX_URL=http://voicebox:17493
@@ -193,6 +220,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped
+
 
 volumes:
   tts-voices:

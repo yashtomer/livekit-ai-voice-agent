@@ -2,7 +2,7 @@ import { useState, useEffect, useRef } from 'react'
 import { DollarSign, TrendingUp, Users, Clock, Server, ChevronDown, ChevronUp, Sparkles } from 'lucide-react'
 import { useModelStore } from '../../store/modelStore'
 
-type CloudProvider = 'aws' | 'gcp'
+type CloudProvider = 'aws' | 'gcp' | 'hostinger'
 
 interface CostEstimatorProps { fxRate: number }
 
@@ -12,13 +12,13 @@ interface ServerTier {
   instance: string
   specs: string
   perHour: number
+  /** When set, overrides perHour at render time using the live fxRate:
+   *  effectivePerHour = inrMonthly / fxRate / 730  */
+  inrMonthly?: number
   latency: string
   icon: string
   tip: string
-  /** How many concurrent voice-agent sessions one of these can host. Used by
-   *  the cost estimator to compute servers_needed = ceil(agents / concurrent),
-   *  which is how cloud bills actually work — one g5.xlarge does ~5 simultaneous
-   *  small-LLM streams, not just one. */
+  /** How many concurrent voice-agent sessions one of these can host. */
   concurrentAgents: number
 }
 
@@ -146,6 +146,72 @@ const GCP_SCENARIOS: Record<string, ServerScenario> = {
   },
 }
 
+// ── Hostinger VPS data (KVM NVMe, original INR prices from hostinger.com/vps-hosting)
+// inrMonthly = crossed-out / regular price shown on pricing page (2025):
+//   KVM 1 ₹1,649 · KVM 2 ₹2,099 · KVM 4 ₹3,499 · KVM 8 ₹6,199
+// perHour is a placeholder — overridden at render time using live fxRate:
+//   effectivePerHour = inrMonthly / fxRate / 730
+// Note: Hostinger offers CPU VPS only — no GPU instances.
+
+const H = (inrMonthly: number) => ({ perHour: 0, inrMonthly })
+
+const HOSTINGER_SCENARIOS: Record<string, ServerScenario> = {
+  cloud: {
+    scenario: 'Pure Cloud — agent worker only',
+    description: 'All AI services run via cloud APIs — only a lightweight VPS is needed for the LiveKit agent worker. Hostinger KVM plans are excellent value for this.',
+    options: [
+      { grade: 'BEST', gradeClass: 'best', instance: 'KVM 2', specs: '2 vCPU · 8 GB RAM · 100 GB NVMe · 8 TB BW', ...H(2099), latency: '~0.4s', icon: '🖥️', tip: 'Recommended worker host — 8 GB RAM handles agent process + VAD threads easily.', concurrentAgents: 10 },
+      { grade: 'GOOD', gradeClass: 'good', instance: 'KVM 1', specs: '1 vCPU · 4 GB RAM · 50 GB NVMe · 4 TB BW',  ...H(1649), latency: '~0.5s', icon: '🖥️', tip: 'Cheapest option — works fine for low concurrency.', concurrentAgents: 5 },
+      { grade: 'OK',   gradeClass: 'ok',   instance: 'KVM 4', specs: '4 vCPU · 16 GB RAM · 200 GB NVMe · 16 TB BW', ...H(3499), latency: '~0.3s', icon: '🖥️', tip: 'Overkill for a pure-cloud worker but gives headroom for high concurrency.', concurrentAgents: 20 },
+    ],
+  },
+  fully_local: {
+    scenario: 'Local models — CPU only (no GPU)',
+    description: 'Hostinger has no GPU VPS. CPU inference works for ≤3B models but latency will be 4–10s — not viable for real-time voice at scale.',
+    options: [
+      { grade: 'OK', gradeClass: 'ok', instance: 'KVM 8', specs: '8 vCPU · 32 GB RAM · 400 GB NVMe · 32 TB BW', ...H(6199), latency: '4–10s', icon: '🖥️', tip: 'Best CPU option — fits ≤3B-Q4 models. Expect high latency; use cloud LLM for production.', concurrentAgents: 1 },
+      { grade: 'OK', gradeClass: 'ok', instance: 'KVM 4', specs: '4 vCPU · 16 GB RAM · 200 GB NVMe · 16 TB BW', ...H(3499), latency: '6–15s', icon: '🖥️', tip: '1–3B Q4 in 16 GB RAM — testing only, not live calls.', concurrentAgents: 1 },
+      { grade: 'OK', gradeClass: 'ok', instance: 'KVM 2', specs: '2 vCPU · 8 GB RAM · 100 GB NVMe · 8 TB BW',  ...H(2099), latency: '>15s',  icon: '🖥️', tip: 'Tight RAM — 1B Q4 only. Not recommended for production.', concurrentAgents: 1 },
+    ],
+  },
+  stt_tts_only: {
+    scenario: 'Local STT/TTS only',
+    description: 'No local LLM — Whisper + Piper run well on Hostinger KVM CPU instances. Excellent value for this workload.',
+    options: [
+      { grade: 'BEST', gradeClass: 'best', instance: 'KVM 4', specs: '4 vCPU · 16 GB RAM · 200 GB NVMe · 16 TB BW', ...H(3499), latency: '<1.5s', icon: '🖥️', tip: '4 cores keep Whisper base latency under 1.5s — recommended for production.', concurrentAgents: 4 },
+      { grade: 'GOOD', gradeClass: 'good', instance: 'KVM 2', specs: '2 vCPU · 8 GB RAM · 100 GB NVMe · 8 TB BW',  ...H(2099), latency: '<2s',   icon: '🖥️', tip: 'Handles 2 concurrent Whisper streams comfortably.', concurrentAgents: 2 },
+      { grade: 'OK',   gradeClass: 'ok',   instance: 'KVM 1', specs: '1 vCPU · 4 GB RAM · 50 GB NVMe · 4 TB BW',   ...H(1649), latency: '2–3s',  icon: '🖥️', tip: 'Bare minimum — Whisper tiny + Piper fit in 4 GB RAM.', concurrentAgents: 1 },
+    ],
+  },
+  llm_small: {
+    scenario: 'Small–Mid LLM (≤ 10B) — CPU fallback',
+    description: 'No GPU on Hostinger — CPU inference produces 4–10s latency. Not viable for live voice. Switch to a cloud LLM provider.',
+    options: [
+      { grade: 'OK', gradeClass: 'ok', instance: 'KVM 8', specs: '8 vCPU · 32 GB RAM · 400 GB NVMe · 32 TB BW', ...H(6199), latency: '4–10s', icon: '🖥️', tip: 'Fits 7B-Q4 in 32 GB RAM — high latency, not for live calls.', concurrentAgents: 1 },
+      { grade: 'OK', gradeClass: 'ok', instance: 'KVM 4', specs: '4 vCPU · 16 GB RAM · 200 GB NVMe · 16 TB BW', ...H(3499), latency: '6–15s', icon: '🖥️', tip: '3B-Q4 only in 16 GB — demo/testing only.', concurrentAgents: 1 },
+      { grade: 'OK', gradeClass: 'ok', instance: 'KVM 2', specs: '2 vCPU · 8 GB RAM · 100 GB NVMe · 8 TB BW',  ...H(2099), latency: '>15s',  icon: '🖥️', tip: 'Not recommended — use a cloud LLM for real-time.', concurrentAgents: 1 },
+    ],
+  },
+  llm_mid: {
+    scenario: 'Mid LLM (13B–32B) — CPU fallback',
+    description: 'No GPU on Hostinger. 13B+ requires 16–24 GB VRAM for real-time; CPU inference takes 15–60s per turn — not viable for voice.',
+    options: [
+      { grade: 'OK', gradeClass: 'ok', instance: 'KVM 8', specs: '8 vCPU · 32 GB RAM · 400 GB NVMe · 32 TB BW', ...H(6199), latency: '15–60s', icon: '🖥️', tip: 'Offline/batch only. Use a cloud LLM for voice.', concurrentAgents: 1 },
+      { grade: 'OK', gradeClass: 'ok', instance: 'KVM 4', specs: '4 vCPU · 16 GB RAM · 200 GB NVMe · 16 TB BW', ...H(3499), latency: '>60s',   icon: '🖥️', tip: 'Not viable for 13B+ inference.', concurrentAgents: 1 },
+      { grade: 'OK', gradeClass: 'ok', instance: 'KVM 2', specs: '2 vCPU · 8 GB RAM · 100 GB NVMe · 8 TB BW',  ...H(2099), latency: 'N/A',     icon: '🖥️', tip: 'Insufficient RAM for 13B.', concurrentAgents: 1 },
+    ],
+  },
+  llm_large: {
+    scenario: 'Large LLM (70B+) — CPU fallback',
+    description: 'No GPU on Hostinger. 70B models need 40+ GB VRAM — not runnable here. Use AWS/GCP GPU instances or a cloud LLM API.',
+    options: [
+      { grade: 'OK', gradeClass: 'ok', instance: 'KVM 8', specs: '8 vCPU · 32 GB RAM · 400 GB NVMe · 32 TB BW', ...H(6199), latency: 'N/A', icon: '🖥️', tip: '70B does not fit in 32 GB RAM — not runnable.', concurrentAgents: 1 },
+      { grade: 'OK', gradeClass: 'ok', instance: 'KVM 4', specs: '4 vCPU · 16 GB RAM · 200 GB NVMe · 16 TB BW', ...H(3499), latency: 'N/A', icon: '🖥️', tip: 'Not viable for 70B — use GPU cloud provider.', concurrentAgents: 1 },
+      { grade: 'OK', gradeClass: 'ok', instance: 'KVM 2', specs: '2 vCPU · 8 GB RAM · 100 GB NVMe · 8 TB BW',  ...H(2099), latency: 'N/A', icon: '🖥️', tip: 'Not viable for 70B — use GPU cloud provider.', concurrentAgents: 1 },
+    ],
+  },
+}
+
 // ── Scenario recommendation ───────────────────────────────────────────────────
 
 type Profile = 'none' | 'cpu_light' | 'cpu_heavy' | 'gpu_small' | 'gpu_mid' | 'gpu_large'
@@ -266,6 +332,15 @@ function GcpLogo({ className }: { className?: string }) {
   )
 }
 
+function HostingerLogo({ className }: { className?: string }) {
+  return (
+    <svg className={className} viewBox="0 0 60 24" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <path d="M8 4h4v7h5V4h4v16h-4v-6H12v6H8V4z" fill="#673DE6"/>
+      <text x="25" y="17" fontSize="9" fontFamily="sans-serif" fill="#673DE6" fontWeight="bold">VPS</text>
+    </svg>
+  )
+}
+
 // ── Main component ────────────────────────────────────────────────────────────
 
 export default function CostEstimator({ fxRate }: CostEstimatorProps) {
@@ -296,7 +371,7 @@ export default function CostEstimator({ fxRate }: CostEstimatorProps) {
 
   const recommendation = recommendScenarioKey(selectedStt, selectedLlm, selectedTts)
   const scenarioKey = recommendation.key
-  const providerScenarios = cloudProvider === 'aws' ? AWS_SCENARIOS : GCP_SCENARIOS
+  const providerScenarios = cloudProvider === 'aws' ? AWS_SCENARIOS : cloudProvider === 'gcp' ? GCP_SCENARIOS : HOSTINGER_SCENARIOS
   const scenario = providerScenarios[scenarioKey]
 
   // Reset tier to 0 when scenario or cloud provider changes to avoid stale
@@ -312,11 +387,14 @@ export default function CostEstimator({ fxRate }: CostEstimatorProps) {
 
   const tierIdx = Math.min(serverTierIdx, scenario.options.length - 1)
   const selectedTier = scenario.options[tierIdx]
-  // One server hosts `concurrentAgents` simultaneous voice sessions, so the
-  // bill scales with the number of *servers needed*, not with the agent count.
+  // Resolve live per-hour rate (INR tiers convert via fxRate from navbar)
+  const selectedTierPerHour = selectedTier.inrMonthly && fxRate > 0
+    ? selectedTier.inrMonthly / fxRate / 730
+    : selectedTier.perHour
+  // One server hosts `concurrentAgents` simultaneous voice sessions
   const serversNeeded = Math.max(1, Math.ceil(agents / Math.max(1, selectedTier.concurrentAgents)))
   const serverHours = serversNeeded * hoursPerDay * daysPerMonth
-  const serverCost = serverHours * selectedTier.perHour
+  const serverCost = serverHours * selectedTierPerHour
   const total = sttCost + llmCost + ttsCost + serverCost
 
   const fmt = (n: number) => n.toFixed(2)
@@ -353,7 +431,9 @@ export default function CostEstimator({ fxRate }: CostEstimatorProps) {
       label: 'Server',
       model: serverLabel,
       cost: serverCost,
-      formula: `${serversNeeded}× $${selectedTier.perHour.toFixed(3)}/hr × ${(hoursPerDay * daysPerMonth).toLocaleString()}h`,
+      formula: selectedTier.inrMonthly
+        ? `${serversNeeded}× ₹${selectedTier.inrMonthly.toLocaleString('en-IN')}/mo (≈$${selectedTierPerHour.toFixed(4)}/hr @ ₹${fxRate.toFixed(2)}/$)`
+        : `${serversNeeded}× $${selectedTierPerHour.toFixed(3)}/hr × ${(hoursPerDay * daysPerMonth).toLocaleString()}h`,
     },
   ]
 
@@ -473,7 +553,7 @@ export default function CostEstimator({ fxRate }: CostEstimatorProps) {
           </button>
 
           <div className="flex items-center gap-1.5 flex-shrink-0 ml-2">
-            {/* AWS / GCP toggle */}
+            {/* AWS / GCP / Hostinger toggle */}
             <div className="flex items-center bg-muted border border-border rounded-lg p-0.5">
               <button
                 onClick={() => setCloudProvider('aws')}
@@ -483,7 +563,7 @@ export default function CostEstimator({ fxRate }: CostEstimatorProps) {
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
-                <span>AWS</span>
+                AWS
               </button>
               <button
                 onClick={() => setCloudProvider('gcp')}
@@ -493,7 +573,17 @@ export default function CostEstimator({ fxRate }: CostEstimatorProps) {
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
-                <span>GCP</span>
+                GCP
+              </button>
+              <button
+                onClick={() => setCloudProvider('hostinger')}
+                className={`flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-semibold transition-all ${
+                  cloudProvider === 'hostinger'
+                    ? 'bg-[#673DE6]/15 text-[#673DE6] border border-[#673DE6]/30 shadow-sm'
+                    : 'text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                Hostinger
               </button>
             </div>
 
@@ -513,10 +603,17 @@ export default function CostEstimator({ fxRate }: CostEstimatorProps) {
               <span className={`inline-flex items-center gap-1 text-[10px] font-bold uppercase tracking-wider px-2 py-0.5 rounded-full border ${
                 cloudProvider === 'aws'
                   ? 'bg-[#FF9900]/10 border-[#FF9900]/30 text-[#FF9900]'
-                  : 'bg-[#4285F4]/10 border-[#4285F4]/30 text-[#4285F4]'
+                  : cloudProvider === 'gcp'
+                  ? 'bg-[#4285F4]/10 border-[#4285F4]/30 text-[#4285F4]'
+                  : 'bg-[#673DE6]/10 border-[#673DE6]/30 text-[#673DE6]'
               }`}>
-                {cloudProvider === 'aws' ? '🟠 Amazon Web Services' : '🔵 Google Cloud Platform'}
+                {cloudProvider === 'aws' ? '🟠 Amazon Web Services' : cloudProvider === 'gcp' ? '🔵 Google Cloud Platform' : '🟣 Hostinger VPS'}
               </span>
+              {cloudProvider === 'hostinger' && (
+                <span className="text-[10px] text-amber-600 dark:text-amber-400 font-medium">
+                  ⚠ CPU only · no GPU instances
+                </span>
+              )}
             </div>
             <p className="text-xs text-muted-foreground mb-2">{scenario.description}</p>
 
@@ -551,6 +648,9 @@ export default function CostEstimator({ fxRate }: CostEstimatorProps) {
             {scenario.options.map((opt, i) => {
               const styles = GRADE_STYLES[opt.gradeClass]
               const isRecommended = i === 0 && opt.gradeClass !== 'cloud'
+              const effectivePerHour = opt.inrMonthly && fxRate > 0
+                ? opt.inrMonthly / fxRate / 730
+                : opt.perHour
               return (
                 <button
                   key={i}
@@ -579,7 +679,7 @@ export default function CostEstimator({ fxRate }: CostEstimatorProps) {
                       )}
                     </div>
                     <span className={`font-semibold text-xs ${i === tierIdx ? styles.badge : 'text-foreground'} flex-shrink-0 ml-2`}>
-                      {opt.perHour === 0 ? 'FREE' : `$${opt.perHour}/hr`}
+                      {effectivePerHour === 0 ? 'FREE' : `$${effectivePerHour.toFixed(4)}/hr`}
                     </span>
                   </div>
                   <p className="text-xs text-muted-foreground">
