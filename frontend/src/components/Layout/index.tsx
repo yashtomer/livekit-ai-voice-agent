@@ -37,6 +37,7 @@ export default function Layout({ children }: LayoutProps) {
     ...(isAdmin() ? [{ to: '/admin', label: 'Admin', icon: Shield }] : []),
   ]
 
+
   return (
     <div className="min-h-screen bg-background flex flex-col">
       {/* Header */}
@@ -68,6 +69,23 @@ export default function Layout({ children }: LayoutProps) {
                 <span className="hidden sm:block">{label}</span>
               </Link>
             ))}
+            <button
+              onClick={() => setIsUltravoxCallOpen(true)}
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-muted transition-all"
+            >
+              <Phone className="w-3.5 h-3.5" />
+              <span className="hidden sm:block">Ultravox</span>
+            </button>
+            <Link
+              to="/gemini"
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
+                location.pathname === '/gemini'
+                  ? 'bg-primary text-primary-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-muted'
+              }`}
+            >
+              <span className="hidden sm:block">Gemini</span>
+            </Link>
           </nav>
 
           {/* Right actions */}
@@ -135,14 +153,6 @@ export default function Layout({ children }: LayoutProps) {
               )}
             </div>
 
-            {/* Ultravox Web Call Button */}
-            <button
-              onClick={() => setIsUltravoxCallOpen(true)}
-              className="flex items-center gap-2 text-white text-xs font-bold px-3 py-1.5 rounded-lg transition-all btn-primary whitespace-nowrap"
-            >
-              <Phone className="w-3.5 h-3.5" />
-              Ultravox Whatsapp
-            </button>
           </div>
         </div>
       </header>
@@ -160,6 +170,7 @@ export default function Layout({ children }: LayoutProps) {
       {isUltravoxCallOpen && (
         <UltravoxCall onClose={() => setIsUltravoxCallOpen(false)} />
       )}
+
     </div>
   )
 }

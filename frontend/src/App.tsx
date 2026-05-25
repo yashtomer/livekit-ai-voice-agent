@@ -3,6 +3,7 @@ import { useAuthStore } from './store/authStore'
 import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
 import Admin from './pages/Admin'
+import GeminiPage from './pages/GeminiPage'
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const isAuth = useAuthStore((s) => s.isAuthenticated())
@@ -35,6 +36,14 @@ export default function App() {
             <AdminRoute>
               <Admin />
             </AdminRoute>
+          }
+        />
+        <Route
+          path="/gemini"
+          element={
+            <PrivateRoute>
+              <GeminiPage />
+            </PrivateRoute>
           }
         />
         <Route path="/" element={<Navigate to="/dashboard" replace />} />

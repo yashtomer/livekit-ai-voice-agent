@@ -23,6 +23,7 @@ class ModelEntryUpdate(BaseModel):
     sort_order: Optional[int] = None
     compute_profile: Optional[str] = None
     min_vram_gb: Optional[int] = None
+    use_case: Optional[str] = None
 
 
 class ModelEntryResponse(BaseModel):
@@ -37,6 +38,7 @@ class ModelEntryResponse(BaseModel):
     sort_order: int
     compute_profile: str = "none"
     min_vram_gb: Optional[int] = None
+    use_case: Optional[str] = None
     is_seed: bool = True
 
     model_config = {"from_attributes": True}

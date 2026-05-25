@@ -11,7 +11,7 @@ from .db import engine, SessionLocal, Base
 from .models import User, UserRole, UserAPIKey, ModelEntry, CallSession, AdminSetting
 from .services.auth import hash_password
 from .seed_data import SEED_MODELS, compute_profile_for
-from .routes import auth, models_route, token_route, admin_route, config_routes, tts_route, fx_route, setup_route, internal_route, ultravox
+from .routes import auth, models_route, token_route, admin_route, config_routes, tts_route, fx_route, setup_route, internal_route, ultravox, whatsapp, gemini_call, twilio_bridge
 from .services import model_setup, room_config_cache
 
 from .log_buffer import install as _install_log_buffer
@@ -38,6 +38,10 @@ async def _migrate_schema() -> None:
         await conn.execute(text(
             "ALTER TABLE model_entries ADD COLUMN IF NOT EXISTS "
             "is_seed BOOLEAN NOT NULL DEFAULT TRUE"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE model_entries ADD COLUMN IF NOT EXISTS "
+            "use_case VARCHAR(2000)"
         ))
 
 
@@ -202,7 +206,10 @@ app.include_router(setup_route.router,   prefix="/api/setup",  tags=["setup"])
 # Internal endpoints — agent worker only, NOT for browser use.
 # Protected by X-Internal-Secret header inside the route.
 app.include_router(internal_route.router, prefix="/internal", tags=["internal"])
-app.include_router(ultravox.router,       prefix="/api/ultravox", tags=["ultravox"])
+app.include_router(ultravox.router,       prefix="/api/ultravox",  tags=["ultravox"])
+app.include_router(whatsapp.router,       prefix="/whatsapp",      tags=["whatsapp"])
+app.include_router(gemini_call.router,    prefix="/gemini",        tags=["gemini"])
+app.include_router(twilio_bridge.router,  prefix="/twilio",        tags=["twilio"])
 
 
 @app.get("/health")

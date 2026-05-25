@@ -30,6 +30,7 @@ class ModelEntry(Base):
         String(32), default="none", nullable=False
     )
     min_vram_gb: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    use_case: Mapped[Optional[str]] = mapped_column(String(2000), nullable=True)
     # True when the row was inserted/updated from SEED_MODELS. Flipped to False
     # the moment an admin PATCHes the row, so future re-seeds don't clobber.
     is_seed: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
