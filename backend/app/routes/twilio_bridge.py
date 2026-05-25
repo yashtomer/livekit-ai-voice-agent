@@ -83,7 +83,7 @@ def _make_live_config(system_prompt: str, language: str):
 @router.get("/voice")
 async def voice_webhook(request: Request):
     host = PUBLIC_HOST or request.url.hostname
-    ws_url = f"wss://{host}/twilio/stream"
+    ws_url = f"wss://{host}/api/twilio/stream"
     log.info("/twilio/voice → stream %s", ws_url)
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
 <Response>

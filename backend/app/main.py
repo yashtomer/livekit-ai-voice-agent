@@ -207,9 +207,9 @@ app.include_router(setup_route.router,   prefix="/api/setup",  tags=["setup"])
 # Protected by X-Internal-Secret header inside the route.
 app.include_router(internal_route.router, prefix="/internal", tags=["internal"])
 app.include_router(ultravox.router,       prefix="/api/ultravox",  tags=["ultravox"])
-app.include_router(whatsapp.router,       prefix="/whatsapp",      tags=["whatsapp"])
-app.include_router(gemini_call.router,    prefix="/gemini",        tags=["gemini"])
-app.include_router(twilio_bridge.router,  prefix="/twilio",        tags=["twilio"])
+app.include_router(whatsapp.router,       prefix="/api/whatsapp",  tags=["whatsapp"])
+app.include_router(gemini_call.router,    prefix="/api/gemini",    tags=["gemini"])
+app.include_router(twilio_bridge.router,  prefix="/api/twilio",    tags=["twilio"])
 
 
 @app.get("/health")
