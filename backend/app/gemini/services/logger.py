@@ -12,8 +12,8 @@ from typing import Optional
 
 from sqlalchemy import select
 
-from ..db import SessionLocal
-from ..models.gemini_call_log import GeminiCallLog
+from ...db import SessionLocal
+from ..models.call_log import GeminiCallLog
 
 log = logging.getLogger("gemini_logger")
 

@@ -9,8 +9,8 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import get_db
-from ..models.gemini_call_log import GeminiCallLog
+from ...db import get_db
+from ..models.call_log import GeminiCallLog
 
 router = APIRouter()
 

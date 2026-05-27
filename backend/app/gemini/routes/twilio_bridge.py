@@ -17,7 +17,10 @@ import os
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import Response, JSONResponse
 
-from ..services.gemini_logger import start_call, add_transcript, end_call
+from ..services.logger import start_call, add_transcript, end_call
+from ..services.agents_store import get_default_phone_agent
+from ..services.tools_runtime import build_gemini_tools, dispatch_tool_call
+from ..agents import DEFAULT_PHONE_AGENT
 
 log = logging.getLogger("twilio_bridge")
 
@@ -34,12 +37,7 @@ TWILIO_TWIML_APP_SID = os.environ.get("TWILIO_TWIML_APP_SID", "").strip()
 MODEL = "gemini-3.1-flash-live-preview"
 INPUT_SAMPLE_RATE = 16000
 
-PHONE_SYSTEM_PROMPT = os.environ.get("PHONE_SYSTEM_PROMPT") or (
-    "You are a professional medical appointment booking assistant. "
-    "Be concise and conversational. "
-    "Greet the patient, collect name, doctor/department, date & time (9am-5pm), "
-    "confirm availability, ask for remarks, confirm booking details, then say goodbye."
-)
+PHONE_SYSTEM_PROMPT = os.environ.get("PHONE_SYSTEM_PROMPT") or DEFAULT_PHONE_AGENT
 
 LANGUAGE_NAMES = {
     "en": "English", "hi": "Hindi", "bn": "Bengali", "ta": "Tamil",
@@ -48,18 +46,19 @@ LANGUAGE_NAMES = {
 }
 
 
-def _make_live_config(system_prompt: str, language: str):
+def _make_live_config(system_prompt: str, language: str, voice: str = "Aoede", tools=None):
     from google import genai as _genai  # noqa: F401 — triggers ImportError early if missing
     from google.genai import types
 
     lang_name = LANGUAGE_NAMES.get(language, "English")
     return types.LiveConnectConfig(
+        tools=tools or [],
         response_modalities=["AUDIO"],
         input_audio_transcription=types.AudioTranscriptionConfig(),
         output_audio_transcription=types.AudioTranscriptionConfig(),
         speech_config=types.SpeechConfig(
             voice_config=types.VoiceConfig(
-                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name="Aoede")
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)
             )
         ),
         realtime_input_config=types.RealtimeInputConfig(
@@ -94,6 +93,29 @@ async def voice_webhook(request: Request):
   </Connect>
 </Response>"""
     return Response(content=twiml, media_type="application/xml")
+
+
+# ── Config endpoint (URLs to paste into Twilio dashboard) ─────────────────────
+
+@router.get("/config")
+async def twilio_config(request: Request):
+    host = PUBLIC_HOST or request.url.hostname
+    return JSONResponse({
+        "public_host": host,
+        "voice_webhook_url":  f"https://{host}/api/twilio/voice",
+        "voice_webhook_method": "POST",
+        "stream_ws_url":      f"wss://{host}/api/twilio/stream",
+        "twiml_app_sid":      TWILIO_TWIML_APP_SID or None,
+        "missing_env": [
+            n for n, v in [
+                ("PUBLIC_HOST", PUBLIC_HOST),
+                ("TWILIO_ACCOUNT_SID", TWILIO_ACCOUNT_SID),
+                ("TWILIO_API_KEY", TWILIO_API_KEY),
+                ("TWILIO_API_SECRET", TWILIO_API_SECRET),
+                ("TWILIO_TWIML_APP_SID", TWILIO_TWIML_APP_SID),
+            ] if not v
+        ],
+    })
 
 
 # ── Twilio Voice SDK access token ─────────────────────────────────────────────
@@ -164,13 +186,20 @@ async def twilio_stream(ws: WebSocket):
                 stream_sid = msg["start"]["streamSid"]
                 log.info("Stream %s started", stream_sid)
                 custom = (msg.get("start") or {}).get("customParameters") or {}
+                # Resolve default agent from DB; fall back to the env/static prompt.
+                _agent = await get_default_phone_agent()
+                call_prompt   = _agent.system_prompt if _agent else PHONE_SYSTEM_PROMPT
+                call_language = _agent.language      if _agent else PHONE_LANGUAGE
+                call_voice    = _agent.voice         if _agent else "Aoede"
+                call_tool_ids = list(_agent.tool_ids or []) if _agent else []
+                call_tools    = await build_gemini_tools(call_tool_ids)
                 call_id = await start_call(
                     call_type="twilio",
                     direction="inbound",
                     phone_number=custom.get("From") or custom.get("from"),
-                    language=PHONE_LANGUAGE,
-                    voice="Aoede",
-                    system_prompt=PHONE_SYSTEM_PROMPT,
+                    language=call_language,
+                    voice=call_voice,
+                    system_prompt=call_prompt,
                 )
             elif msg.get("event") == "stop":
                 return
@@ -190,7 +219,7 @@ async def twilio_stream(ws: WebSocket):
             try:
                 async with client.aio.live.connect(
                     model=MODEL,
-                    config=_make_live_config(PHONE_SYSTEM_PROMPT, PHONE_LANGUAGE),
+                    config=_make_live_config(call_prompt, call_language, call_voice, tools=call_tools),
                 ) as session:
                     if reconnect_count:
                         log.debug("Gemini Live reconnected (attempt %d)", reconnect_count)
@@ -221,6 +250,19 @@ async def twilio_stream(ws: WebSocket):
                         nonlocal out_state
                         while True:
                             async for response in session.receive():
+                                # Tool calls from Gemini
+                                tc = getattr(response, "tool_call", None)
+                                if tc and tc.function_calls:
+                                    tool_responses = []
+                                    for fc in tc.function_calls:
+                                        result = await dispatch_tool_call(call_tool_ids, fc.name, dict(fc.args or {}))
+                                        log.info("🔧 tool %s(%s) → %s", fc.name, dict(fc.args or {}), result)
+                                        tool_responses.append(
+                                            types.FunctionResponse(id=fc.id, name=fc.name, response=result)
+                                        )
+                                    await session.send_tool_response(function_responses=tool_responses)
+                                    continue
+
                                 sc = response.server_content
                                 if sc and sc.interrupted and stream_sid:
                                     await ws.send_text(json.dumps({"event": "clear", "streamSid": stream_sid}))

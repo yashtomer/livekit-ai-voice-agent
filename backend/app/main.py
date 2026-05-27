@@ -8,10 +8,15 @@ from sqlalchemy import select, text, update
 from .config import CORS_ORIGINS, ADMIN_EMAIL, ADMIN_PASSWORD
 from .db import engine, SessionLocal, Base
 # Import all models so SQLAlchemy registers them before create_all
-from .models import User, UserRole, UserAPIKey, ModelEntry, CallSession, AdminSetting, GeminiCallLog
+from .models import User, UserRole, UserAPIKey, ModelEntry, CallSession, AdminSetting
+from .gemini.models.call_log import GeminiCallLog  # noqa: F401 — register table for create_all
+from .gemini.models.agent import GeminiAgent  # noqa: F401 — register table for create_all
+from .gemini.models.tool import GeminiTool  # noqa: F401 — register table for create_all
 from .services.auth import hash_password
 from .seed_data import SEED_MODELS, compute_profile_for
-from .routes import auth, models_route, token_route, admin_route, config_routes, tts_route, fx_route, setup_route, internal_route, ultravox, whatsapp, gemini_call, twilio_bridge, vobiz_bridge, gemini_calls, voice_samples
+from .routes import auth, models_route, token_route, admin_route, config_routes, tts_route, fx_route, setup_route, internal_route
+from .ultravox.routes import ultravox, whatsapp
+from .gemini.routes import call as gemini_call, calls as gemini_calls, twilio_bridge, vobiz_bridge, voice_samples, agents as gemini_agents, tools as gemini_tools_route
 from .services import model_setup, room_config_cache
 
 from .log_buffer import install as _install_log_buffer
@@ -42,6 +47,11 @@ async def _migrate_schema() -> None:
         await conn.execute(text(
             "ALTER TABLE model_entries ADD COLUMN IF NOT EXISTS "
             "use_case VARCHAR(2000)"
+        ))
+        # gemini_agents.tool_ids — JSON list of tool IDs assigned to the agent.
+        await conn.execute(text(
+            "ALTER TABLE gemini_agents ADD COLUMN IF NOT EXISTS "
+            "tool_ids JSONB NOT NULL DEFAULT '[]'::jsonb"
         ))
 
 
@@ -170,6 +180,10 @@ async def lifespan(app: FastAPI):
         await conn.run_sync(Base.metadata.create_all)
     await _migrate_schema()
     await _seed_database()
+    from .gemini.services.agents_store import seed_builtin_agents
+    from .gemini.services.tools_runtime import seed_builtin_tools
+    await seed_builtin_agents()
+    await seed_builtin_tools()
     # Make sure the LiveKit turn-detector model is available; download in
     # background if missing so the API stays responsive.
     await model_setup.ensure_downloaded_in_background()
@@ -213,6 +227,8 @@ app.include_router(twilio_bridge.router,  prefix="/api/twilio",    tags=["twilio
 app.include_router(vobiz_bridge.router,   prefix="/api/vobiz",     tags=["vobiz"])
 app.include_router(gemini_calls.router,   prefix="/api/gemini-calls", tags=["gemini-calls"])
 app.include_router(voice_samples.router,  prefix="/api/voice-samples", tags=["voice-samples"])
+app.include_router(gemini_agents.router,  prefix="/api/agents", tags=["agents"])
+app.include_router(gemini_tools_route.router, prefix="/api/tools", tags=["tools"])
 
 
 @app.get("/health")

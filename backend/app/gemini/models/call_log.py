@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Any, Optional
 from sqlalchemy import DateTime, Integer, JSON, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
-from ..db import Base
+from ...db import Base
 
 
 class GeminiCallLog(Base):

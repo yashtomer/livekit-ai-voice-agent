@@ -3,7 +3,6 @@ from .api_key import UserAPIKey
 from .model_entry import ModelEntry, ModelType
 from .call_session import CallSession
 from .admin_setting import AdminSetting
-from .gemini_call_log import GeminiCallLog
 
 __all__ = [
     "User", "UserRole",
@@ -11,5 +10,4 @@ __all__ = [
     "ModelEntry", "ModelType",
     "CallSession",
     "AdminSetting",
-    "GeminiCallLog",
 ]

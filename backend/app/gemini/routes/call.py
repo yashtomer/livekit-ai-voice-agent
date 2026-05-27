@@ -17,12 +17,12 @@ import time
 from fastapi import APIRouter, Query, WebSocket, WebSocketDisconnect
 from sqlalchemy import select
 
-from ..db import SessionLocal
-from ..models.user import User, UserRole
-from ..models.api_key import UserAPIKey
-from ..services.auth import decode_token
-from ..services.encryption import decrypt_key
-from ..services.gemini_logger import start_call, add_transcript, end_call
+from ...db import SessionLocal
+from ...models.user import User, UserRole
+from ...models.api_key import UserAPIKey
+from ...services.auth import decode_token
+from ...services.encryption import decrypt_key
+from ..services.logger import start_call, add_transcript, end_call
 
 log = logging.getLogger("gemini_call")
 
@@ -87,13 +87,12 @@ async def _resolve_api_key(token: str) -> tuple[str | None, bool]:
         return None, is_admin
 
 
-def _make_live_config(system_prompt: str, language: str, voice: str = "Aoede"):
+def _make_live_config(system_prompt: str, language: str, voice: str = "Aoede", tools=None):
     from google.genai import types
-    from ..agent_tools import make_tools
 
     lang_name = LANGUAGE_NAMES.get(language, "English")
     lang_note = f"\n\nCRITICAL: Respond ONLY in {lang_name}. Every word must be in {lang_name}."
-    return types.LiveConnectConfig(
+    cfg = types.LiveConnectConfig(
         response_modalities=["AUDIO"],
         input_audio_transcription=types.AudioTranscriptionConfig(),
         output_audio_transcription=types.AudioTranscriptionConfig(),
@@ -111,11 +110,12 @@ def _make_live_config(system_prompt: str, language: str, voice: str = "Aoede"):
             ),
             activity_handling=types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
         ),
-        tools=make_tools(),
+        tools=tools or [],
         system_instruction=types.Content(
             parts=[types.Part(text=system_prompt + lang_note)]
         ),
     )
+    return cfg
 
 
 async def _send(ws: WebSocket, obj: dict) -> None:
@@ -145,6 +145,7 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
     system_prompt = DEFAULT_SYSTEM_PROMPT
     language = "en"
     voice = "Aoede"
+    tool_ids: list[int] = []
     try:
         msg = await asyncio.wait_for(websocket.receive(), timeout=5.0)
         raw = msg.get("text") or ""
@@ -154,8 +155,15 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
                 system_prompt = cfg.get("system_prompt", "").strip() or DEFAULT_SYSTEM_PROMPT
                 language = cfg.get("language", "en").strip()
                 voice = cfg.get("voice", "Aoede").strip() or "Aoede"
+                raw_ids = cfg.get("tool_ids") or []
+                if isinstance(raw_ids, list):
+                    tool_ids = [int(t) for t in raw_ids if isinstance(t, (int, str)) and str(t).isdigit()]
     except (asyncio.TimeoutError, json.JSONDecodeError):
         pass
+
+    # Resolve the agent's tools (if any)
+    from ..services.tools_runtime import build_gemini_tools, dispatch_tool_call as _dispatch
+    gemini_tools = await build_gemini_tools(tool_ids)
 
     call_id = await start_call(
         call_type="browser",
@@ -184,7 +192,7 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
             try:
                 async with client.aio.live.connect(
                     model=MODEL,
-                    config=_make_live_config(system_prompt, language, voice),
+                    config=_make_live_config(system_prompt, language, voice, tools=gemini_tools),
                 ) as session:
                     if reconnect_count:
                         log.info("Gemini Live reconnected (attempt %d)", reconnect_count)
@@ -223,10 +231,9 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
                                 # Tool calls from Gemini
                                 tc = getattr(response, "tool_call", None)
                                 if tc and tc.function_calls:
-                                    from ..agent_tools import dispatch_tool_call
                                     tool_responses = []
                                     for fc in tc.function_calls:
-                                        result = dispatch_tool_call(fc.name, dict(fc.args or {}))
+                                        result = await _dispatch(tool_ids, fc.name, dict(fc.args or {}))
                                         log.info("🔧 tool %s(%s) → %s", fc.name, dict(fc.args or {}), result)
                                         tool_responses.append(
                                             types.FunctionResponse(id=fc.id, name=fc.name, response=result)

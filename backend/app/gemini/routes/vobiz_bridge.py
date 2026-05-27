@@ -32,9 +32,12 @@ from fastapi import APIRouter, Depends, Request, WebSocket, WebSocketDisconnect,
 from fastapi.responses import Response, JSONResponse
 from pydantic import BaseModel
 
-from ..models.user import User
-from .auth import get_current_user
-from ..services.gemini_logger import start_call, add_transcript, end_call
+from ...models.user import User
+from ...routes.auth import get_current_user
+from ..services.logger import start_call, add_transcript, end_call
+from ..services.agents_store import get_default_phone_agent
+from ..services.tools_runtime import build_gemini_tools, dispatch_tool_call
+from ..agents import DEFAULT_PHONE_AGENT
 
 log = logging.getLogger("vobiz_bridge")
 
@@ -51,35 +54,7 @@ MODEL = os.environ.get("GEMINI_LIVE_MODEL", "gemini-2.0-flash-live-001")
 API_VERSION = os.environ.get("GEMINI_API_VERSION", "v1beta")
 INPUT_SAMPLE_RATE = 16000  # Gemini expects PCM16 @ 16kHz
 
-PHONE_SYSTEM_PROMPT = os.environ.get("PHONE_SYSTEM_PROMPT") or (
-    "You are Asha, a warm, professional medical-appointment booking assistant "
-    "on a phone call.\n\n"
-    "CRITICAL CONVERSATION RULES (follow strictly):\n"
-    "1. Ask ONLY ONE question per turn. Never bundle multiple questions.\n"
-    "2. Keep every reply under 2 short sentences.\n"
-    "3. After each question, STOP and wait for the caller's answer.\n"
-    "4. Acknowledge their answer briefly before the next question "
-    "   (e.g. \"Got it, Priya.\").\n"
-    "5. If you do not hear clearly, politely ask them to repeat.\n\n"
-    "INFORMATION TO COLLECT (in this exact order, one at a time):\n"
-    "  a) Caller's full name.\n"
-    "  b) Department they need. After they tell you the department, "
-    "     IMMEDIATELY call the tool `get_doctors_by_department` with that "
-    "     department name, then read out the available doctors and ask "
-    "     which one they prefer.\n"
-    "  c) Preferred date.\n"
-    "  d) Preferred time (clinic hours 9am-5pm; if outside, ask again).\n"
-    "  e) Any remarks or special requirements.\n\n"
-    "TOOL USAGE RULES:\n"
-    "- ONLY use real doctor names returned by `get_doctors_by_department`. "
-    "  Never invent doctor names.\n"
-    "- If the tool returns status 'not_found', read out the available "
-    "  departments it lists and ask the caller to pick one.\n\n"
-    "FINAL STEP: Repeat back all five details to confirm, ask 'Is that correct?', "
-    "then thank them and say goodbye.\n\n"
-    "OPENING LINE (say exactly this when the call starts):\n"
-    "  \"Hello, this is Asha from the medical clinic. May I have your full name, please?\""
-)
+PHONE_SYSTEM_PROMPT = os.environ.get("PHONE_SYSTEM_PROMPT") or DEFAULT_PHONE_AGENT
 
 LANGUAGE_NAMES = {
     "en": "English", "hi": "Hindi", "bn": "Bengali", "ta": "Tamil",
@@ -88,9 +63,8 @@ LANGUAGE_NAMES = {
 }
 
 
-def _make_live_config(system_prompt: str, language: str, voice: str = "Aoede"):
+def _make_live_config(system_prompt: str, language: str, voice: str = "Aoede", tools=None):
     from google.genai import types
-    from ..agent_tools import make_tools
 
     lang_name = LANGUAGE_NAMES.get(language, "English")
 
@@ -107,7 +81,7 @@ def _make_live_config(system_prompt: str, language: str, voice: str = "Aoede"):
 
     return types.LiveConnectConfig(
         response_modalities=["AUDIO"],
-        tools=make_tools(),
+        tools=tools or [],
         input_audio_transcription=types.AudioTranscriptionConfig(),
         output_audio_transcription=types.AudioTranscriptionConfig(),
         speech_config=types.SpeechConfig(
@@ -157,6 +131,7 @@ class OutboundCallRequest(BaseModel):
     system_prompt: str | None = None  # optional: override default agent prompt
     language: str | None = None       # optional: override PHONE_LANGUAGE
     voice: str | None = None          # optional: override default voice
+    tool_ids: list[int] | None = None  # optional: tools to expose to the agent
 
 
 @router.post("/call")
@@ -181,6 +156,7 @@ async def make_outbound_call(
         "system_prompt": (req.system_prompt or "").strip() or PHONE_SYSTEM_PROMPT,
         "language":      (req.language or "").strip() or PHONE_LANGUAGE,
         "voice":         (req.voice or "").strip() or "Aoede",
+        "tool_ids":      list(req.tool_ids or []),
         "to":            req.to,
         "_ts":           datetime.utcnow().timestamp(),
     }
@@ -292,12 +268,16 @@ async def vobiz_stream(ws: WebSocket):
         call_prompt   = call_cfg["system_prompt"]
         call_language = call_cfg["language"]
         call_voice    = call_cfg["voice"]
+        call_tool_ids = list(call_cfg.get("tool_ids") or [])
         log.info("Vobiz stream using per-call cfg %s (lang=%s, voice=%s)",
                  cfg_id, call_language, call_voice)
     else:
-        call_prompt   = PHONE_SYSTEM_PROMPT
-        call_language = PHONE_LANGUAGE
-        call_voice    = "Aoede"
+        _agent = await get_default_phone_agent()
+        call_prompt   = _agent.system_prompt if _agent else PHONE_SYSTEM_PROMPT
+        call_language = _agent.language      if _agent else PHONE_LANGUAGE
+        call_voice    = _agent.voice         if _agent else "Aoede"
+        call_tool_ids = list(_agent.tool_ids or []) if _agent else []
+    call_tools = await build_gemini_tools(call_tool_ids)
 
     stream_id: str | None = None
     call_id: str | None = None
@@ -348,7 +328,7 @@ async def vobiz_stream(ws: WebSocket):
     try:
         async with client.aio.live.connect(
             model=MODEL,
-            config=_make_live_config(call_prompt, call_language, call_voice),
+            config=_make_live_config(call_prompt, call_language, call_voice, tools=call_tools),
         ) as session:
 
             async def vobiz_to_gemini():
@@ -388,7 +368,6 @@ async def vobiz_stream(ws: WebSocket):
 
             async def gemini_to_vobiz():
                 nonlocal out_state
-                from ..agent_tools import dispatch_tool_call
                 from google.genai import types as gtypes
 
                 play_count = 0
@@ -399,7 +378,7 @@ async def vobiz_stream(ws: WebSocket):
                         if tc and tc.function_calls:
                             tool_responses = []
                             for fc in tc.function_calls:
-                                result = dispatch_tool_call(fc.name, dict(fc.args or {}))
+                                result = await dispatch_tool_call(call_tool_ids, fc.name, dict(fc.args or {}))
                                 log.info("🔧 tool %s(%s) → %s", fc.name, dict(fc.args or {}), result)
                                 tool_responses.append(
                                     gtypes.FunctionResponse(

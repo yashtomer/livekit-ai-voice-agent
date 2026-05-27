@@ -28,7 +28,7 @@ GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 MODEL = os.environ.get("GEMINI_LIVE_MODEL", "gemini-2.0-flash-live-001")
 API_VERSION = os.environ.get("GEMINI_API_VERSION", "v1beta")
 
-SAMPLE_DIR = Path(__file__).resolve().parents[2] / "voice_samples"
+SAMPLE_DIR = Path(__file__).resolve().parents[3] / "voice_samples"
 SAMPLE_DIR.mkdir(parents=True, exist_ok=True)
 
 _VOICE_NAME = re.compile(r"^[A-Za-z]{2,40}$")
