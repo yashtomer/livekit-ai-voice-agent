@@ -22,13 +22,15 @@ from ..models.user import User, UserRole
 from ..models.api_key import UserAPIKey
 from ..services.auth import decode_token
 from ..services.encryption import decrypt_key
+from ..services.gemini_logger import start_call, add_transcript, end_call
 
 log = logging.getLogger("gemini_call")
 
 router = APIRouter()
 
 SERVER_GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
-MODEL = "gemini-3.1-flash-live-preview"
+MODEL = os.environ.get("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview")
+API_VERSION = os.environ.get("GEMINI_API_VERSION", "v1alpha")
 INPUT_SAMPLE_RATE = 16000
 
 LANGUAGE_NAMES = {
@@ -87,6 +89,7 @@ async def _resolve_api_key(token: str) -> tuple[str | None, bool]:
 
 def _make_live_config(system_prompt: str, language: str, voice: str = "Aoede"):
     from google.genai import types
+    from ..agent_tools import make_tools
 
     lang_name = LANGUAGE_NAMES.get(language, "English")
     lang_note = f"\n\nCRITICAL: Respond ONLY in {lang_name}. Every word must be in {lang_name}."
@@ -108,6 +111,7 @@ def _make_live_config(system_prompt: str, language: str, voice: str = "Aoede"):
             ),
             activity_handling=types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
         ),
+        tools=make_tools(),
         system_instruction=types.Content(
             parts=[types.Part(text=system_prompt + lang_note)]
         ),
@@ -153,104 +157,184 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
     except (asyncio.TimeoutError, json.JSONDecodeError):
         pass
 
+    call_id = await start_call(
+        call_type="browser",
+        direction=None,
+        language=language,
+        voice=voice,
+        system_prompt=system_prompt,
+    )
+
     try:
         from google import genai
         from google.genai import types
 
-        client = genai.Client(api_key=api_key, http_options={"api_version": "v1alpha"})
+        client = genai.Client(api_key=api_key, http_options={"api_version": API_VERSION})
 
-        async with client.aio.live.connect(model=MODEL, config=_make_live_config(system_prompt, language, voice)) as session:
-            await _send(websocket, {"type": "status", "state": "idle"})
+        # Preview Live models (e.g. gemini-3.1-flash-live-preview) often get
+        # reaped by the server after ~1 turn with a 1006 abnormal closure.
+        # We loop here and silently reconnect Gemini while keeping the
+        # browser WebSocket open, so the user experiences a continuous call.
+        client_closed = False
+        reconnect_count = 0
 
-            async def frontend_to_gemini():
-                while True:
-                    try:
-                        msg = await websocket.receive()
-                    except WebSocketDisconnect:
-                        return
-                    raw_bytes = msg.get("bytes")
-                    if raw_bytes:
-                        await session.send_realtime_input(
-                            audio=types.Blob(
-                                data=bytes(raw_bytes),
-                                mime_type=f"audio/pcm;rate={INPUT_SAMPLE_RATE}",
-                            )
-                        )
+        await _send(websocket, {"type": "status", "state": "idle"})
 
-            async def gemini_to_frontend():
-                while True:
-                    user_chunks: list[str] = []
-                    model_chunks: list[str] = []
-                    sent_speaking = False
-                    user_end_ts = None
-                    first_audio_ts = None
+        while not client_closed:
+            try:
+                async with client.aio.live.connect(
+                    model=MODEL,
+                    config=_make_live_config(system_prompt, language, voice),
+                ) as session:
+                    if reconnect_count:
+                        log.info("Gemini Live reconnected (attempt %d)", reconnect_count)
 
-                    async for response in session.receive():
-                        if response.data:
-                            if first_audio_ts is None:
-                                first_audio_ts = time.monotonic()
-                                if user_end_ts is not None:
-                                    log.info("⏱ user→first audio: %.0f ms", (first_audio_ts - user_end_ts) * 1000)
+                    async def frontend_to_gemini():
+                        nonlocal client_closed
+                        while True:
                             try:
-                                await websocket.send_bytes(response.data)
-                            except Exception:
+                                msg = await websocket.receive()
+                            except (WebSocketDisconnect, RuntimeError):
+                                client_closed = True
                                 return
-                            if not sent_speaking:
-                                await _send(websocket, {"type": "status", "state": "speaking"})
-                                sent_speaking = True
+                            raw_bytes = msg.get("bytes")
+                            if raw_bytes:
+                                try:
+                                    await session.send_realtime_input(
+                                        audio=types.Blob(
+                                            data=bytes(raw_bytes),
+                                            mime_type=f"audio/pcm;rate={INPUT_SAMPLE_RATE}",
+                                        )
+                                    )
+                                except Exception:
+                                    # Gemini side died; let gemini_to_frontend's
+                                    # receive() raise the real error and trigger reconnect.
+                                    return
 
-                        sc = response.server_content
-                        if sc is None:
-                            continue
-
-                        if sc.interrupted:
-                            await _send(websocket, {"type": "interrupted"})
-                            await _send(websocket, {"type": "status", "state": "listening"})
-                            model_chunks = []
+                    async def gemini_to_frontend():
+                        while True:
+                            user_chunks: list[str] = []
+                            model_chunks: list[str] = []
                             sent_speaking = False
-                            first_audio_ts = None
                             user_end_ts = None
+                            first_audio_ts = None
 
-                        if sc.input_transcription and sc.input_transcription.text:
-                            user_chunks.append(sc.input_transcription.text)
-                            if user_end_ts is None:
-                                user_end_ts = time.monotonic()
-                        if sc.output_transcription and sc.output_transcription.text:
-                            model_chunks.append(sc.output_transcription.text)
+                            async for response in session.receive():
+                                # Tool calls from Gemini
+                                tc = getattr(response, "tool_call", None)
+                                if tc and tc.function_calls:
+                                    from ..agent_tools import dispatch_tool_call
+                                    tool_responses = []
+                                    for fc in tc.function_calls:
+                                        result = dispatch_tool_call(fc.name, dict(fc.args or {}))
+                                        log.info("🔧 tool %s(%s) → %s", fc.name, dict(fc.args or {}), result)
+                                        tool_responses.append(
+                                            types.FunctionResponse(id=fc.id, name=fc.name, response=result)
+                                        )
+                                    await session.send_tool_response(function_responses=tool_responses)
+                                    continue
 
-                        if sc.turn_complete:
-                            if user_chunks:
-                                text = "".join(user_chunks).strip()
-                                if text:
-                                    await _send(websocket, {"type": "transcript", "role": "user", "text": text})
-                            if model_chunks:
-                                text = "".join(model_chunks).strip()
-                                if text:
-                                    await _send(websocket, {"type": "transcript", "role": "model", "text": text})
-                            await _send(websocket, {"type": "status", "state": "listening"})
+                                if response.data:
+                                    if first_audio_ts is None:
+                                        first_audio_ts = time.monotonic()
+                                        if user_end_ts is not None:
+                                            log.info("⏱ user→first audio: %.0f ms", (first_audio_ts - user_end_ts) * 1000)
+                                    try:
+                                        await websocket.send_bytes(response.data)
+                                    except Exception:
+                                        return
+                                    if not sent_speaking:
+                                        await _send(websocket, {"type": "status", "state": "speaking"})
+                                        sent_speaking = True
 
-                    await asyncio.sleep(0)
+                                sc = response.server_content
+                                if sc is None:
+                                    continue
 
-            done, pending = await asyncio.wait(
-                [
-                    asyncio.create_task(frontend_to_gemini(), name="f2g"),
-                    asyncio.create_task(gemini_to_frontend(), name="g2f"),
-                ],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for task in pending:
-                task.cancel()
-                try:
-                    await task
-                except asyncio.CancelledError:
-                    pass
-            for task in done:
-                exc = task.exception()
-                if exc and not isinstance(exc, WebSocketDisconnect):
-                    raise exc
+                                if sc.interrupted:
+                                    await _send(websocket, {"type": "interrupted"})
+                                    await _send(websocket, {"type": "status", "state": "listening"})
+                                    model_chunks = []
+                                    sent_speaking = False
+                                    first_audio_ts = None
+                                    user_end_ts = None
+
+                                if sc.input_transcription and sc.input_transcription.text:
+                                    user_chunks.append(sc.input_transcription.text)
+                                    if user_end_ts is None:
+                                        user_end_ts = time.monotonic()
+                                if sc.output_transcription and sc.output_transcription.text:
+                                    model_chunks.append(sc.output_transcription.text)
+
+                                if sc.turn_complete:
+                                    if user_chunks:
+                                        text = "".join(user_chunks).strip()
+                                        if text:
+                                            await _send(websocket, {"type": "transcript", "role": "user", "text": text})
+                                            await add_transcript(call_id, "user", text)
+                                    if model_chunks:
+                                        text = "".join(model_chunks).strip()
+                                        if text:
+                                            await _send(websocket, {"type": "transcript", "role": "model", "text": text})
+                                            await add_transcript(call_id, "model", text)
+                                    await _send(websocket, {"type": "status", "state": "listening"})
+
+                            await asyncio.sleep(0)
+
+                    done, pending = await asyncio.wait(
+                        [
+                            asyncio.create_task(frontend_to_gemini(), name="f2g"),
+                            asyncio.create_task(gemini_to_frontend(), name="g2f"),
+                        ],
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for task in pending:
+                        task.cancel()
+                        try:
+                            await task
+                        except asyncio.CancelledError:
+                            pass
+                    # Re-raise the first non-disconnect exception so the outer
+                    # try/except can decide whether to reconnect or bail.
+                    for task in done:
+                        exc = task.exception()
+                        if exc and not isinstance(exc, WebSocketDisconnect):
+                            raise exc
+
+                # Either side completed cleanly. If browser is still open,
+                # treat it as an unexpected end and reconnect.
+                if client_closed:
+                    break
+
+            except WebSocketDisconnect:
+                client_closed = True
+                break
+            except Exception as exc:
+                # Handle APIError 1006/1011, ConnectionClosedError, ConnectionResetError, etc.
+                code = getattr(exc, "code", None)
+                msg = str(exc)
+                exc_type = type(exc).__name__
+                if (
+                    "APIError" in exc_type or
+                    "ConnectionClosed" in exc_type or
+                    isinstance(exc, (ConnectionResetError, BrokenPipeError)) or
+                    (code in (1006, 1011)) or
+                    "abnormal closure" in msg or
+                    "1006" in msg or
+                    "1011" in msg
+                ):
+                    reconnect_count += 1
+                    log.debug("Gemini reset (%s: %s) — reconnecting (#%d)", exc_type, msg[:60], reconnect_count)
+                    await asyncio.sleep(0.3)
+                    continue
+                raise
 
     except WebSocketDisconnect:
         log.info("Gemini WS: client disconnected")
     except Exception as exc:
         log.exception("Gemini WS error: %s", exc)
         await _send(websocket, {"type": "error", "message": str(exc)})
+        await end_call(call_id, status="error", error_message=str(exc))
+        return
+    finally:
+        await end_call(call_id)

@@ -1,0 +1,466 @@
+"""
+Vobiz ↔ Gemini Live bridge.
+
+Vobiz is a Plivo-compatible voice API. Inbound calls flow:
+
+  Caller dials Vobiz number
+      → Vobiz POSTs to /api/vobiz/voice (Answer URL configured in Vobiz dashboard)
+      → We respond with XML containing <Stream>wss://.../api/vobiz/stream</Stream>
+      → Vobiz opens a WebSocket to /api/vobiz/stream
+      → Caller audio (μ-law 8kHz) is forwarded to Gemini Live
+      → Gemini PCM 24kHz audio is downsampled to μ-law 8kHz and sent back
+      → Both sides talk in real time
+
+Routes (mounted under /api/vobiz in main.py):
+  POST/GET /voice    — Vobiz Answer URL webhook
+  WS       /stream   — bidirectional audio stream
+  POST     /status   — optional stream status callback
+"""
+
+import asyncio
+import audioop
+import base64
+import json
+import logging
+import os
+import uuid
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+import aiohttp
+from fastapi import APIRouter, Depends, Request, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi.responses import Response, JSONResponse
+from pydantic import BaseModel
+
+from ..models.user import User
+from .auth import get_current_user
+from ..services.gemini_logger import start_call, add_transcript, end_call
+
+log = logging.getLogger("vobiz_bridge")
+
+router = APIRouter()
+
+GOOGLE_API_KEY     = os.environ.get("GOOGLE_API_KEY", "")
+PUBLIC_HOST        = os.environ.get("PUBLIC_HOST", "").strip()
+PHONE_LANGUAGE     = os.environ.get("PHONE_LANGUAGE", "en")
+VOBIZ_AUTH_ID      = os.environ.get("VOBIZ_AUTH_ID", "").strip()
+VOBIZ_AUTH_TOKEN   = os.environ.get("VOBIZ_AUTH_TOKEN", "").strip()
+VOBIZ_PHONE_NUMBER = os.environ.get("VOBIZ_PHONE_NUMBER", "").strip()
+
+MODEL = os.environ.get("GEMINI_LIVE_MODEL", "gemini-2.0-flash-live-001")
+API_VERSION = os.environ.get("GEMINI_API_VERSION", "v1beta")
+INPUT_SAMPLE_RATE = 16000  # Gemini expects PCM16 @ 16kHz
+
+PHONE_SYSTEM_PROMPT = os.environ.get("PHONE_SYSTEM_PROMPT") or (
+    "You are Asha, a warm, professional medical-appointment booking assistant "
+    "on a phone call.\n\n"
+    "CRITICAL CONVERSATION RULES (follow strictly):\n"
+    "1. Ask ONLY ONE question per turn. Never bundle multiple questions.\n"
+    "2. Keep every reply under 2 short sentences.\n"
+    "3. After each question, STOP and wait for the caller's answer.\n"
+    "4. Acknowledge their answer briefly before the next question "
+    "   (e.g. \"Got it, Priya.\").\n"
+    "5. If you do not hear clearly, politely ask them to repeat.\n\n"
+    "INFORMATION TO COLLECT (in this exact order, one at a time):\n"
+    "  a) Caller's full name.\n"
+    "  b) Department they need. After they tell you the department, "
+    "     IMMEDIATELY call the tool `get_doctors_by_department` with that "
+    "     department name, then read out the available doctors and ask "
+    "     which one they prefer.\n"
+    "  c) Preferred date.\n"
+    "  d) Preferred time (clinic hours 9am-5pm; if outside, ask again).\n"
+    "  e) Any remarks or special requirements.\n\n"
+    "TOOL USAGE RULES:\n"
+    "- ONLY use real doctor names returned by `get_doctors_by_department`. "
+    "  Never invent doctor names.\n"
+    "- If the tool returns status 'not_found', read out the available "
+    "  departments it lists and ask the caller to pick one.\n\n"
+    "FINAL STEP: Repeat back all five details to confirm, ask 'Is that correct?', "
+    "then thank them and say goodbye.\n\n"
+    "OPENING LINE (say exactly this when the call starts):\n"
+    "  \"Hello, this is Asha from the medical clinic. May I have your full name, please?\""
+)
+
+LANGUAGE_NAMES = {
+    "en": "English", "hi": "Hindi", "bn": "Bengali", "ta": "Tamil",
+    "te": "Telugu", "mr": "Marathi", "gu": "Gujarati", "es": "Spanish",
+    "fr": "French", "de": "German", "ja": "Japanese", "ko": "Korean", "zh": "Chinese",
+}
+
+
+def _make_live_config(system_prompt: str, language: str, voice: str = "Aoede"):
+    from google.genai import types
+    from ..agent_tools import make_tools
+
+    lang_name = LANGUAGE_NAMES.get(language, "English")
+
+    # Gemini Live has no clock — inject the real current time (IST) so it
+    # can reason about "today", "tomorrow", "9am", etc. correctly.
+    now_ist = datetime.now(ZoneInfo("Asia/Kolkata"))
+    clock_block = (
+        f"\n\nCURRENT DATE/TIME CONTEXT (Asia/Kolkata, India Standard Time):\n"
+        f"  Today is {now_ist.strftime('%A, %d %B %Y')}.\n"
+        f"  The current time is {now_ist.strftime('%I:%M %p')} IST.\n"
+        "  Use these values whenever you need to compute or quote a date/time. "
+        "Never guess or invent dates."
+    )
+
+    return types.LiveConnectConfig(
+        response_modalities=["AUDIO"],
+        tools=make_tools(),
+        input_audio_transcription=types.AudioTranscriptionConfig(),
+        output_audio_transcription=types.AudioTranscriptionConfig(),
+        speech_config=types.SpeechConfig(
+            voice_config=types.VoiceConfig(
+                prebuilt_voice_config=types.PrebuiltVoiceConfig(voice_name=voice)
+            )
+        ),
+        realtime_input_config=types.RealtimeInputConfig(
+            automatic_activity_detection=types.AutomaticActivityDetection(
+                start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
+                end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_HIGH,
+                prefix_padding_ms=20,
+                silence_duration_ms=100,
+            ),
+            activity_handling=types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
+        ),
+        system_instruction=types.Content(
+            parts=[types.Part(
+                text=system_prompt
+                     + clock_block
+                     + f"\n\nCRITICAL: Respond ONLY in {lang_name}."
+            )]
+        ),
+    )
+
+
+# ── Outbound call trigger ─────────────────────────────────────────────────────
+
+# Per-call overrides keyed by short UUID. The id flows:
+#   /call  → stores entry → puts ?cfg=<id> on answer_url
+#   /voice → reads cfg from query → embeds it in the Stream URL
+#   /stream WS → reads cfg → loads + pops the entry
+# Entries auto-expire after 1h to avoid leaks if a call never connects.
+CALL_CONFIGS: dict[str, dict] = {}
+_CALL_CONFIG_TTL_SEC = 3600
+
+
+def _gc_call_configs() -> None:
+    now = datetime.utcnow().timestamp()
+    expired = [k for k, v in CALL_CONFIGS.items() if now - v.get("_ts", now) > _CALL_CONFIG_TTL_SEC]
+    for k in expired:
+        CALL_CONFIGS.pop(k, None)
+
+
+class OutboundCallRequest(BaseModel):
+    to: str  # E.164, e.g. "+919876543210"
+    system_prompt: str | None = None  # optional: override default agent prompt
+    language: str | None = None       # optional: override PHONE_LANGUAGE
+    voice: str | None = None          # optional: override default voice
+
+
+@router.post("/call")
+async def make_outbound_call(
+    req: OutboundCallRequest,
+    _user: User = Depends(get_current_user),
+):
+    """Trigger an outbound Vobiz call. When the recipient answers, Vobiz hits
+    our /voice webhook which connects them to the Gemini agent."""
+    missing = [n for n, v in [
+        ("VOBIZ_AUTH_ID", VOBIZ_AUTH_ID),
+        ("VOBIZ_AUTH_TOKEN", VOBIZ_AUTH_TOKEN),
+        ("VOBIZ_PHONE_NUMBER", VOBIZ_PHONE_NUMBER),
+        ("PUBLIC_HOST", PUBLIC_HOST),
+    ] if not v]
+    if missing:
+        raise HTTPException(500, f"Missing env vars: {', '.join(missing)}")
+
+    _gc_call_configs()
+    cfg_id = uuid.uuid4().hex[:12]
+    CALL_CONFIGS[cfg_id] = {
+        "system_prompt": (req.system_prompt or "").strip() or PHONE_SYSTEM_PROMPT,
+        "language":      (req.language or "").strip() or PHONE_LANGUAGE,
+        "voice":         (req.voice or "").strip() or "Aoede",
+        "to":            req.to,
+        "_ts":           datetime.utcnow().timestamp(),
+    }
+
+    url = f"https://api.vobiz.ai/api/v1/Account/{VOBIZ_AUTH_ID}/Call/"
+    answer_url = f"https://{PUBLIC_HOST}/api/vobiz/voice?cfg={cfg_id}"
+    hangup_url = f"https://{PUBLIC_HOST}/api/vobiz/status"
+
+    payload = {
+        "from": VOBIZ_PHONE_NUMBER.lstrip("+"),
+        "to":   req.to.lstrip("+"),
+        "answer_url":    answer_url,
+        "answer_method": "POST",
+        "hangup_url":    hangup_url,
+        "hangup_method": "POST",
+        "time_limit":    600,
+    }
+
+    async with aiohttp.ClientSession() as session:
+        async with session.post(
+            url,
+            json=payload,
+            headers={
+                "X-Auth-ID":    VOBIZ_AUTH_ID,
+                "X-Auth-Token": VOBIZ_AUTH_TOKEN,
+            },
+        ) as resp:
+            body = await resp.text()
+            log.info("vobiz /Call/ → %s %s", resp.status, body)
+            try:
+                data = json.loads(body)
+            except ValueError:
+                data = {"raw": body}
+            if resp.status >= 400:
+                raise HTTPException(resp.status, data)
+            return JSONResponse(data)
+
+
+# ── Answer URL webhook ────────────────────────────────────────────────────────
+
+@router.post("/voice")
+@router.get("/voice")
+async def voice_webhook(request: Request):
+    """Vobiz hits this when a call comes in. Returns XML telling Vobiz to
+    open a bidirectional WebSocket to our /stream endpoint."""
+    host = PUBLIC_HOST or request.url.hostname
+    cfg = request.query_params.get("cfg", "")
+    ws_url = f"wss://{host}/api/vobiz/stream"
+    if cfg:
+        ws_url += f"?cfg={cfg}"
+    log.info("/api/vobiz/voice → stream %s", ws_url)
+    xml = f"""<?xml version="1.0" encoding="UTF-8"?>
+<Response>
+  <Stream bidirectional="true"
+          keepCallAlive="true"
+          contentType="audio/x-mulaw;rate=8000">
+    {ws_url}
+  </Stream>
+</Response>"""
+    return Response(content=xml, media_type="application/xml")
+
+
+@router.post("/status")
+async def stream_status(request: Request):
+    """Optional: Vobiz sends StartStream / PlayedStream / StopStream callbacks here.
+    Body can be form-encoded OR JSON depending on the event — accept either."""
+    ctype = request.headers.get("content-type", "")
+    try:
+        if "json" in ctype:
+            data = await request.json()
+        elif "form" in ctype or "urlencoded" in ctype:
+            data = dict(await request.form())
+        else:
+            data = (await request.body()).decode("utf-8", errors="replace")
+        log.info("stream-status (%s): %s", ctype, data)
+    except Exception as e:
+        log.warning("status callback parse error: %s", e)
+    return Response(status_code=204)
+
+
+# ── Audio transcoding helpers ─────────────────────────────────────────────────
+
+def _mulaw8k_to_pcm16k(mulaw_bytes: bytes, state):
+    pcm8k = audioop.ulaw2lin(mulaw_bytes, 2)
+    pcm16k, state = audioop.ratecv(pcm8k, 2, 1, 8000, 16000, state)
+    return pcm16k, state
+
+
+def _pcm24k_to_mulaw8k(pcm24k_bytes: bytes, state):
+    pcm8k, state = audioop.ratecv(pcm24k_bytes, 2, 1, 24000, 8000, state)
+    return audioop.lin2ulaw(pcm8k, 2), state
+
+
+# ── Vobiz WebSocket bridge ────────────────────────────────────────────────────
+
+@router.websocket("/stream")
+async def vobiz_stream(ws: WebSocket):
+    await ws.accept()
+    log.info("Vobiz media stream connected")
+
+    if not GOOGLE_API_KEY:
+        log.error("GOOGLE_API_KEY not configured")
+        await ws.close()
+        return
+
+    cfg_id = ws.query_params.get("cfg", "")
+    call_cfg = CALL_CONFIGS.pop(cfg_id, None) if cfg_id else None
+    if call_cfg:
+        call_prompt   = call_cfg["system_prompt"]
+        call_language = call_cfg["language"]
+        call_voice    = call_cfg["voice"]
+        log.info("Vobiz stream using per-call cfg %s (lang=%s, voice=%s)",
+                 cfg_id, call_language, call_voice)
+    else:
+        call_prompt   = PHONE_SYSTEM_PROMPT
+        call_language = PHONE_LANGUAGE
+        call_voice    = "Aoede"
+
+    stream_id: str | None = None
+    call_id: str | None = None
+    in_state = None
+    out_state = None
+    log_id: int | None = None
+    to_number = (call_cfg or {}).get("to") if call_cfg else None
+
+    # Wait for Vobiz "start" event before opening Gemini session
+    try:
+        while stream_id is None:
+            raw = await ws.receive_text()
+            msg = json.loads(raw)
+            event = msg.get("event")
+            if event == "start":
+                log.info("Vobiz START event: %s", raw)
+                # Vobiz (Plivo-style) nests fields under "start"
+                start = msg.get("start", {}) or {}
+                stream_id = (
+                    msg.get("streamId") or msg.get("stream_id")
+                    or start.get("streamId") or start.get("stream_id")
+                    or start.get("streamSid")
+                )
+                call_id = (
+                    msg.get("callId") or msg.get("call_id")
+                    or start.get("callId") or start.get("call_id")
+                    or start.get("callSid")
+                )
+                log.info("Vobiz stream %s (call %s) started", stream_id, call_id)
+                log_id = await start_call(
+                    call_type="vobiz",
+                    direction="outbound" if to_number else "inbound",
+                    phone_number=to_number,
+                    language=call_language,
+                    voice=call_voice,
+                    system_prompt=call_prompt,
+                )
+            elif event == "stop":
+                return
+    except WebSocketDisconnect:
+        return
+
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=GOOGLE_API_KEY, http_options={"api_version": API_VERSION})
+
+    try:
+        async with client.aio.live.connect(
+            model=MODEL,
+            config=_make_live_config(call_prompt, call_language, call_voice),
+        ) as session:
+
+            async def vobiz_to_gemini():
+                nonlocal in_state
+                media_count = 0
+                while True:
+                    raw = await ws.receive_text()
+                    msg = json.loads(raw)
+                    event = msg.get("event")
+                    if event == "media":
+                        media = msg.get("media", {})
+                        payload = media.get("payload", "")
+                        if not payload:
+                            if media_count == 0:
+                                log.info("Vobiz first MEDIA event (no payload): %s", raw[:300])
+                            continue
+                        if media_count == 0:
+                            log.info("Vobiz first MEDIA event received, %d bytes payload",
+                                     len(payload))
+                        media_count += 1
+                        if media_count % 250 == 0:
+                            log.info("Vobiz → Gemini: %d media events", media_count)
+                        mulaw = base64.b64decode(payload)
+                        pcm16k, in_state = _mulaw8k_to_pcm16k(mulaw, in_state)
+                        await session.send_realtime_input(
+                            audio=types.Blob(
+                                data=pcm16k,
+                                mime_type=f"audio/pcm;rate={INPUT_SAMPLE_RATE}",
+                            )
+                        )
+                    elif event == "stop":
+                        log.info("Vobiz stream %s stopped (got %d media events)",
+                                 stream_id, media_count)
+                        return
+                    else:
+                        log.info("Vobiz event %s: %s", event, raw[:200])
+
+            async def gemini_to_vobiz():
+                nonlocal out_state
+                from ..agent_tools import dispatch_tool_call
+                from google.genai import types as gtypes
+
+                play_count = 0
+                while True:
+                    async for response in session.receive():
+                        # ─── Tool calls from Gemini ───
+                        tc = getattr(response, "tool_call", None)
+                        if tc and tc.function_calls:
+                            tool_responses = []
+                            for fc in tc.function_calls:
+                                result = dispatch_tool_call(fc.name, dict(fc.args or {}))
+                                log.info("🔧 tool %s(%s) → %s", fc.name, dict(fc.args or {}), result)
+                                tool_responses.append(
+                                    gtypes.FunctionResponse(
+                                        id=fc.id,
+                                        name=fc.name,
+                                        response=result,
+                                    )
+                                )
+                            await session.send_tool_response(function_responses=tool_responses)
+                            continue
+
+                        sc = response.server_content
+                        # Barge-in: caller interrupted → flush Vobiz playback queue
+                        if sc and sc.interrupted and stream_id:
+                            await ws.send_text(json.dumps({
+                                "event": "clearAudio",
+                                "streamId": stream_id,
+                            }))
+                        if response.data:
+                            mulaw, out_state = _pcm24k_to_mulaw8k(response.data, out_state)
+                            msg = {
+                                "event": "playAudio",
+                                "media": {
+                                    "contentType": "audio/x-mulaw",
+                                    "sampleRate": 8000,
+                                    "payload": base64.b64encode(mulaw).decode(),
+                                },
+                            }
+                            if stream_id:
+                                msg["streamId"] = stream_id
+                            await ws.send_text(json.dumps(msg))
+                            if play_count == 0:
+                                log.info("First playAudio sent (%d bytes mulaw)", len(mulaw))
+                            play_count += 1
+                        if sc and sc.input_transcription and sc.input_transcription.text:
+                            log.info("👤 %s", sc.input_transcription.text)
+                            await add_transcript(log_id, "user", sc.input_transcription.text)
+                        if sc and sc.output_transcription and sc.output_transcription.text:
+                            log.info("🤖 %s", sc.output_transcription.text)
+                            await add_transcript(log_id, "model", sc.output_transcription.text)
+                    await asyncio.sleep(0)
+
+            done, pending = await asyncio.wait(
+                [
+                    asyncio.create_task(vobiz_to_gemini(), name="v2g"),
+                    asyncio.create_task(gemini_to_vobiz(), name="g2v"),
+                ],
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            for t in pending:
+                t.cancel()
+                try:
+                    await t
+                except asyncio.CancelledError:
+                    pass
+
+    except WebSocketDisconnect:
+        log.info("Vobiz stream disconnected (stream_id=%s)", stream_id)
+    except Exception as exc:
+        log.exception("Vobiz bridge error")
+        await end_call(log_id, status="error", error_message=str(exc))
+        return
+    finally:
+        await end_call(log_id)

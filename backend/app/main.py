@@ -8,10 +8,10 @@ from sqlalchemy import select, text, update
 from .config import CORS_ORIGINS, ADMIN_EMAIL, ADMIN_PASSWORD
 from .db import engine, SessionLocal, Base
 # Import all models so SQLAlchemy registers them before create_all
-from .models import User, UserRole, UserAPIKey, ModelEntry, CallSession, AdminSetting
+from .models import User, UserRole, UserAPIKey, ModelEntry, CallSession, AdminSetting, GeminiCallLog
 from .services.auth import hash_password
 from .seed_data import SEED_MODELS, compute_profile_for
-from .routes import auth, models_route, token_route, admin_route, config_routes, tts_route, fx_route, setup_route, internal_route, ultravox, whatsapp, gemini_call, twilio_bridge
+from .routes import auth, models_route, token_route, admin_route, config_routes, tts_route, fx_route, setup_route, internal_route, ultravox, whatsapp, gemini_call, twilio_bridge, vobiz_bridge, gemini_calls, voice_samples
 from .services import model_setup, room_config_cache
 
 from .log_buffer import install as _install_log_buffer
@@ -210,6 +210,9 @@ app.include_router(ultravox.router,       prefix="/api/ultravox",  tags=["ultrav
 app.include_router(whatsapp.router,       prefix="/api/whatsapp",  tags=["whatsapp"])
 app.include_router(gemini_call.router,    prefix="/api/gemini",    tags=["gemini"])
 app.include_router(twilio_bridge.router,  prefix="/api/twilio",    tags=["twilio"])
+app.include_router(vobiz_bridge.router,   prefix="/api/vobiz",     tags=["vobiz"])
+app.include_router(gemini_calls.router,   prefix="/api/gemini-calls", tags=["gemini-calls"])
+app.include_router(voice_samples.router,  prefix="/api/voice-samples", tags=["voice-samples"])
 
 
 @app.get("/health")

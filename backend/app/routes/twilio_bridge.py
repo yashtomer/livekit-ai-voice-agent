@@ -17,6 +17,8 @@ import os
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import Response, JSONResponse
 
+from ..services.gemini_logger import start_call, add_transcript, end_call
+
 log = logging.getLogger("twilio_bridge")
 
 router = APIRouter()
@@ -152,6 +154,7 @@ async def twilio_stream(ws: WebSocket):
     stream_sid: str | None = None
     in_state = None
     out_state = None
+    call_id: int | None = None
 
     try:
         while stream_sid is None:
@@ -160,6 +163,15 @@ async def twilio_stream(ws: WebSocket):
             if msg.get("event") == "start":
                 stream_sid = msg["start"]["streamSid"]
                 log.info("Stream %s started", stream_sid)
+                custom = (msg.get("start") or {}).get("customParameters") or {}
+                call_id = await start_call(
+                    call_type="twilio",
+                    direction="inbound",
+                    phone_number=custom.get("From") or custom.get("from"),
+                    language=PHONE_LANGUAGE,
+                    voice="Aoede",
+                    system_prompt=PHONE_SYSTEM_PROMPT,
+                )
             elif msg.get("event") == "stop":
                 return
     except WebSocketDisconnect:
@@ -170,61 +182,111 @@ async def twilio_stream(ws: WebSocket):
 
     client = genai.Client(api_key=GOOGLE_API_KEY, http_options={"api_version": "v1alpha"})
 
+    client_closed = False
+    reconnect_count = 0
+
     try:
-        async with client.aio.live.connect(
-            model=MODEL,
-            config=_make_live_config(PHONE_SYSTEM_PROMPT, PHONE_LANGUAGE),
-        ) as session:
+        while not client_closed:
+            try:
+                async with client.aio.live.connect(
+                    model=MODEL,
+                    config=_make_live_config(PHONE_SYSTEM_PROMPT, PHONE_LANGUAGE),
+                ) as session:
+                    if reconnect_count:
+                        log.debug("Gemini Live reconnected (attempt %d)", reconnect_count)
 
-            async def twilio_to_gemini():
-                nonlocal in_state
-                while True:
-                    raw = await ws.receive_text()
-                    msg = json.loads(raw)
-                    if msg.get("event") == "media":
-                        mulaw = base64.b64decode(msg["media"]["payload"])
-                        pcm16k, in_state = _mulaw8k_to_pcm16k(mulaw, in_state)
-                        await session.send_realtime_input(
-                            audio=types.Blob(data=pcm16k, mime_type=f"audio/pcm;rate={INPUT_SAMPLE_RATE}")
-                        )
-                    elif msg.get("event") == "stop":
-                        return
+                    async def twilio_to_gemini():
+                        nonlocal in_state, client_closed
+                        while True:
+                            try:
+                                raw = await ws.receive_text()
+                            except WebSocketDisconnect:
+                                client_closed = True
+                                return
+                            msg = json.loads(raw)
+                            if msg.get("event") == "media":
+                                mulaw = base64.b64decode(msg["media"]["payload"])
+                                pcm16k, in_state = _mulaw8k_to_pcm16k(mulaw, in_state)
+                                try:
+                                    await session.send_realtime_input(
+                                        audio=types.Blob(data=pcm16k, mime_type=f"audio/pcm;rate={INPUT_SAMPLE_RATE}")
+                                    )
+                                except Exception:
+                                    return
+                            elif msg.get("event") == "stop":
+                                client_closed = True
+                                return
 
-            async def gemini_to_twilio():
-                nonlocal out_state
-                while True:
-                    async for response in session.receive():
-                        sc = response.server_content
-                        if sc and sc.interrupted and stream_sid:
-                            await ws.send_text(json.dumps({"event": "clear", "streamSid": stream_sid}))
-                        if response.data and stream_sid:
-                            mulaw, out_state = _pcm24k_to_mulaw8k(response.data, out_state)
-                            await ws.send_text(json.dumps({
-                                "event": "media",
-                                "streamSid": stream_sid,
-                                "media": {"payload": base64.b64encode(mulaw).decode()},
-                            }))
-                        if sc and sc.input_transcription and sc.input_transcription.text:
-                            log.info("👤 %s", sc.input_transcription.text)
-                        if sc and sc.output_transcription and sc.output_transcription.text:
-                            log.info("🤖 %s", sc.output_transcription.text)
-                    await asyncio.sleep(0)
+                    async def gemini_to_twilio():
+                        nonlocal out_state
+                        while True:
+                            async for response in session.receive():
+                                sc = response.server_content
+                                if sc and sc.interrupted and stream_sid:
+                                    await ws.send_text(json.dumps({"event": "clear", "streamSid": stream_sid}))
+                                if response.data and stream_sid:
+                                    mulaw, out_state = _pcm24k_to_mulaw8k(response.data, out_state)
+                                    await ws.send_text(json.dumps({
+                                        "event": "media",
+                                        "streamSid": stream_sid,
+                                        "media": {"payload": base64.b64encode(mulaw).decode()},
+                                    }))
+                                if sc and sc.input_transcription and sc.input_transcription.text:
+                                    log.info("👤 %s", sc.input_transcription.text)
+                                    await add_transcript(call_id, "user", sc.input_transcription.text)
+                                if sc and sc.output_transcription and sc.output_transcription.text:
+                                    log.info("🤖 %s", sc.output_transcription.text)
+                                    await add_transcript(call_id, "model", sc.output_transcription.text)
+                            await asyncio.sleep(0)
 
-            done, pending = await asyncio.wait(
-                [
-                    asyncio.create_task(twilio_to_gemini(), name="t2g"),
-                    asyncio.create_task(gemini_to_twilio(), name="g2t"),
-                ],
-                return_when=asyncio.FIRST_COMPLETED,
-            )
-            for t in pending:
-                t.cancel()
-                try:
-                    await t
-                except asyncio.CancelledError:
-                    pass
+                    done, pending = await asyncio.wait(
+                        [
+                            asyncio.create_task(twilio_to_gemini(), name="t2g"),
+                            asyncio.create_task(gemini_to_twilio(), name="g2t"),
+                        ],
+                        return_when=asyncio.FIRST_COMPLETED,
+                    )
+                    for t in pending:
+                        t.cancel()
+                        try:
+                            await t
+                        except asyncio.CancelledError:
+                            pass
+                    for t in done:
+                        exc = t.exception()
+                        if exc and not isinstance(exc, WebSocketDisconnect):
+                            raise exc
+
+                if client_closed:
+                    break
+
+            except WebSocketDisconnect:
+                client_closed = True
+                break
+            except Exception as exc:
+                code = getattr(exc, "code", None)
+                msg_s = str(exc)
+                exc_type = type(exc).__name__
+                if (
+                    "APIError" in exc_type or
+                    "ConnectionClosed" in exc_type or
+                    isinstance(exc, (ConnectionResetError, BrokenPipeError)) or
+                    (code in (1006, 1011)) or
+                    "abnormal closure" in msg_s or
+                    "1006" in msg_s or
+                    "1011" in msg_s
+                ):
+                    reconnect_count += 1
+                    log.debug("Gemini reset (%s: %s) — reconnecting (#%d)", exc_type, msg_s[:60], reconnect_count)
+                    await asyncio.sleep(0.3)
+                    continue
+                raise
 
     except WebSocketDisconnect:
         log.info("Twilio stream disconnected (stream_sid=%s)", stream_sid)
-    except Exception:
+    except Exception as exc:
         log.exception("Twilio bridge error")
+        await end_call(call_id, status="error", error_message=str(exc))
+        return
+    finally:
+        await end_call(call_id)

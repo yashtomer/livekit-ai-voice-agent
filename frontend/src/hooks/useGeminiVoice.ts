@@ -19,9 +19,9 @@ function getWsUrl(): string {
   const token = localStorage.getItem('access_token') || ''
   const tokenParam = token ? `?token=${encodeURIComponent(token)}` : ''
   if (base && !base.includes('host.docker.internal')) {
-    return base.replace(/^https?/, proto.slice(0, -1)) + '/gemini/ws' + tokenParam
+    return base.replace(/^https?/, proto.slice(0, -1)) + '/api/gemini/ws' + tokenParam
   }
-  return `${proto}//${window.location.hostname}:8000/gemini/ws${tokenParam}`
+  return `${proto}//${window.location.hostname}:8000/api/gemini/ws${tokenParam}`
 }
 
 function int16ToFloat32(buf: ArrayBuffer): Float32Array {

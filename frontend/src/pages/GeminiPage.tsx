@@ -1,9 +1,44 @@
-import { useState, useEffect, useRef } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { Device, Call } from '@twilio/voice-sdk'
-import { Phone, PhoneOff, Mic, MicOff, ChevronDown, Settings } from 'lucide-react'
+import { Phone, PhoneOff, Mic, MicOff, ChevronDown, Settings, Home, ListVideo, Eye, X, RefreshCw, Play, Loader2, Mic2 } from 'lucide-react'
 import Layout from '../components/Layout'
 import useGeminiVoice, { type GeminiStatus } from '../hooks/useGeminiVoice'
 import { useUIStore } from '../store/uiStore'
+
+// ── Helpers ──────────────────────────────────────────────────────────────────
+
+function backendBase(): string {
+  const raw = (import.meta.env.VITE_BACKEND_URL as string | undefined) || ''
+  if (raw && !raw.includes('host.docker.internal')) return raw
+  return `${window.location.protocol}//${window.location.hostname}:8000`
+}
+
+function formatDateTime(iso: string | null): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso
+  return d.toLocaleString(undefined, { dateStyle: 'medium', timeStyle: 'short' })
+}
+
+function formatDuration(s: number | null): string {
+  if (s == null) return '—'
+  if (s < 60) return `${s}s`
+  const m = Math.floor(s / 60)
+  const r = s % 60
+  return `${m}m ${r}s`
+}
+
+const CALL_TYPE_LABEL: Record<string, string> = {
+  browser: 'Browser Voice',
+  twilio:  'Twilio Bridge',
+  vobiz:   'Vobiz',
+}
+
+const CALL_TYPE_BADGE: Record<string, string> = {
+  browser: 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20',
+  twilio:  'bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20',
+  vobiz:   'bg-green-500/10 text-green-600 dark:text-green-400 border-green-500/20',
+}
 
 // ── Constants ────────────────────────────────────────────────────────────────
 
@@ -153,7 +188,7 @@ function PhoneDialer() {
 
   async function ensureDevice() {
     if (deviceRef.current) return deviceRef.current
-    const res = await fetch(`${backendUrl}/twilio/token`)
+    const res = await fetch(`${backendUrl}/api/twilio/token`)
     if (!res.ok) {
       const body = await res.json().catch(() => ({}))
       throw new Error(body.detail || `Token fetch failed: ${res.status}`)
@@ -275,11 +310,476 @@ function PhoneDialer() {
   )
 }
 
+// ── Outbound Call Dialer ─────────────────────────────────────────────────────
+
+function OutboundDialer() {
+  const [phone, setPhone] = useState('')
+  const [templateIdx, setTemplateIdx] = useState(1) // default Healthcare
+  const [systemPrompt, setSystemPrompt] = useState(TEMPLATES[1].prompt)
+  const [language, setLanguage] = useState('en')
+  const [voice, setVoice] = useState('Aoede')
+  const [busy, setBusy] = useState(false)
+  const [status, setStatus] = useState<{ kind: 'idle' | 'ok' | 'error'; msg: string }>({ kind: 'idle', msg: '' })
+
+  const rawBackend = (import.meta.env.VITE_BACKEND_URL as string | undefined) || ''
+  const backendUrl = rawBackend && !rawBackend.includes('host.docker.internal')
+    ? rawBackend
+    : `${window.location.protocol}//${window.location.hostname}:8000`
+
+  function handleTemplateChange(idx: number) {
+    setTemplateIdx(idx)
+    setSystemPrompt(TEMPLATES[idx].prompt)
+  }
+
+  function normalizePhone(raw: string): string | null {
+    const digits = raw.replace(/[^\d]/g, '')
+    if (!digits) return null
+    // Indian default: 10 digits → prefix +91. Otherwise expect E.164.
+    if (digits.length === 10) return '+91' + digits
+    if (raw.trim().startsWith('+')) return '+' + digits
+    if (digits.length > 10) return '+' + digits
+    return null
+  }
+
+  async function placeCall() {
+    setStatus({ kind: 'idle', msg: '' })
+    const to = normalizePhone(phone)
+    if (!to) {
+      setStatus({ kind: 'error', msg: 'Enter a valid 10-digit Indian number or full E.164 (+91…)' })
+      return
+    }
+    const token = localStorage.getItem('access_token') || ''
+    setBusy(true)
+    try {
+      const res = await fetch(`${backendUrl}/api/vobiz/call`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify({ to, system_prompt: systemPrompt, language, voice }),
+      })
+      const body = await res.json().catch(() => ({}))
+      if (!res.ok) {
+        const detail = typeof body?.detail === 'string' ? body.detail : JSON.stringify(body?.detail ?? body)
+        setStatus({ kind: 'error', msg: detail || `Call failed (${res.status})` })
+        return
+      }
+      setStatus({ kind: 'ok', msg: `Calling ${to}… (your phone should ring shortly)` })
+    } catch (e) {
+      setStatus({ kind: 'error', msg: (e as Error).message || 'Network error' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <div className="w-full max-w-2xl flex flex-col gap-5 py-2">
+      <div className="text-center">
+        <div className="w-16 h-16 rounded-full bg-gradient-to-br from-green-500 to-emerald-600 flex items-center justify-center mx-auto mb-3 shadow-2xl">
+          <Phone className="w-7 h-7 text-white" />
+        </div>
+        <h2 className="text-lg font-bold text-foreground">Outbound Call</h2>
+        <p className="text-sm text-muted-foreground mt-1">
+          Place a Vobiz call to any Indian number. The agent calls them and speaks via Gemini Live.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div className="sm:col-span-2">
+          <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1.5 block">
+            Phone number
+          </label>
+          <input
+            type="tel"
+            value={phone}
+            onChange={e => setPhone(e.target.value)}
+            disabled={busy}
+            placeholder="9876543210  or  +91 98765 43210"
+            className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary disabled:opacity-50"
+          />
+          <p className="text-[11px] text-muted-foreground mt-1">10-digit Indian numbers auto-prefix +91.</p>
+        </div>
+
+        <div>
+          <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1.5 block">Agent</label>
+          <div className="relative">
+            <select
+              value={templateIdx}
+              onChange={e => handleTemplateChange(Number(e.target.value))}
+              disabled={busy}
+              className="w-full appearance-none bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground pr-8 focus:outline-none focus:border-primary disabled:opacity-50"
+            >
+              {TEMPLATES.map((t, i) => <option key={i} value={i}>{t.label}</option>)}
+            </select>
+            <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+          </div>
+        </div>
+
+        <div>
+          <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1.5 block">Language</label>
+          <div className="relative">
+            <select
+              value={language}
+              onChange={e => setLanguage(e.target.value)}
+              disabled={busy}
+              className="w-full appearance-none bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground pr-8 focus:outline-none focus:border-primary disabled:opacity-50"
+            >
+              {LANGUAGES.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}
+            </select>
+            <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+          </div>
+        </div>
+
+        <div className="sm:col-span-2">
+          <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1.5 block">Voice</label>
+          <div className="relative">
+            <select
+              value={voice}
+              onChange={e => setVoice(e.target.value)}
+              disabled={busy}
+              className="w-full appearance-none bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground pr-8 focus:outline-none focus:border-primary disabled:opacity-50"
+            >
+              {VOICES.map(v => (
+                <option key={v.name} value={v.name}>
+                  {v.name} ({v.gender === 'F' ? 'Female' : v.gender === 'M' ? 'Male' : 'Neutral'}) — {v.style}
+                </option>
+              ))}
+            </select>
+            <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+          </div>
+        </div>
+
+        <div className="sm:col-span-2">
+          <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1.5 block">
+            Agent prompt (editable)
+          </label>
+          <textarea
+            value={systemPrompt}
+            onChange={e => setSystemPrompt(e.target.value)}
+            disabled={busy}
+            className="w-full min-h-[140px] bg-muted/50 border border-border rounded-xl px-3 py-2.5 text-xs text-foreground resize-y leading-relaxed focus:outline-none focus:border-primary disabled:opacity-50"
+          />
+        </div>
+      </div>
+
+      {status.kind !== 'idle' && (
+        <div className={`rounded-xl px-4 py-3 text-sm border ${
+          status.kind === 'ok'
+            ? 'bg-green-500/10 border-green-500/25 text-green-700 dark:text-green-400'
+            : 'bg-destructive/10 border-destructive/25 text-destructive'
+        }`}>
+          {status.msg}
+        </div>
+      )}
+
+      <div className="flex justify-center">
+        <button
+          onClick={placeCall}
+          disabled={busy || !phone.trim()}
+          className="flex items-center gap-2 px-8 py-3 rounded-xl bg-green-600 hover:bg-green-700 text-white font-semibold transition-all shadow-lg active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed"
+        >
+          <Phone className="w-5 h-5" />
+          {busy ? 'Placing call…' : 'Call Now'}
+        </button>
+      </div>
+    </div>
+  )
+}
+
+// ── Calls List View ──────────────────────────────────────────────────────────
+
+type CallSummary = {
+  id: number
+  call_type: string
+  direction: string | null
+  phone_number: string | null
+  language: string | null
+  voice: string | null
+  status: string
+  started_at: string | null
+  ended_at: string | null
+  duration_s: number | null
+  turn_count: number
+}
+
+type CallDetail = CallSummary & {
+  system_prompt: string | null
+  transcript: { role: string; text: string; ts: string }[]
+  error_message: string | null
+}
+
+function CallsView() {
+  const [items, setItems] = useState<CallSummary[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [selected, setSelected] = useState<CallDetail | null>(null)
+  const [detailLoading, setDetailLoading] = useState(false)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const res = await fetch(`${backendBase()}/api/gemini-calls/`)
+      if (!res.ok) throw new Error(`Failed: ${res.status}`)
+      const body = await res.json()
+      setItems(body.items || [])
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  async function openCall(id: number) {
+    setDetailLoading(true)
+    try {
+      const res = await fetch(`${backendBase()}/api/gemini-calls/${id}`)
+      if (!res.ok) throw new Error(`Failed: ${res.status}`)
+      setSelected(await res.json())
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setDetailLoading(false)
+    }
+  }
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0 p-6 gap-4">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-bold text-foreground">Calls</h1>
+          <p className="text-sm text-muted-foreground">History of all Gemini Live calls with transcripts</p>
+        </div>
+        <button
+          onClick={load}
+          className="flex items-center gap-2 px-3 py-1.5 text-sm rounded-lg border border-border bg-background hover:bg-muted transition-all"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+          Refresh
+        </button>
+      </div>
+
+      {error && (
+        <div className="bg-destructive/10 border border-destructive/20 rounded-xl px-4 py-3 text-sm text-destructive">
+          {error}
+        </div>
+      )}
+
+      <div className="card flex-1 min-h-0 overflow-auto p-0">
+        <table className="w-full text-sm">
+          <thead className="sticky top-0 bg-card border-b border-border">
+            <tr className="text-left text-muted-foreground text-xs uppercase tracking-wide">
+              <th className="px-4 py-3 font-semibold">ID</th>
+              <th className="px-4 py-3 font-semibold">Type</th>
+              <th className="px-4 py-3 font-semibold">Direction</th>
+              <th className="px-4 py-3 font-semibold">Phone</th>
+              <th className="px-4 py-3 font-semibold">Started</th>
+              <th className="px-4 py-3 font-semibold">Duration</th>
+              <th className="px-4 py-3 font-semibold">Turns</th>
+              <th className="px-4 py-3 font-semibold">Status</th>
+              <th className="px-4 py-3 font-semibold text-right">Actions</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && items.length === 0 ? (
+              <tr><td colSpan={9} className="px-4 py-10 text-center text-muted-foreground">Loading…</td></tr>
+            ) : items.length === 0 ? (
+              <tr><td colSpan={9} className="px-4 py-10 text-center text-muted-foreground">No calls yet.</td></tr>
+            ) : items.map(row => (
+              <tr key={row.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
+                <td className="px-4 py-3 font-mono text-xs text-muted-foreground">#{row.id}</td>
+                <td className="px-4 py-3">
+                  <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-semibold border ${CALL_TYPE_BADGE[row.call_type] || 'bg-muted text-foreground border-border'}`}>
+                    {CALL_TYPE_LABEL[row.call_type] || row.call_type}
+                  </span>
+                </td>
+                <td className="px-4 py-3 text-muted-foreground capitalize">{row.direction || '—'}</td>
+                <td className="px-4 py-3 font-mono text-xs">{row.phone_number || '—'}</td>
+                <td className="px-4 py-3 text-muted-foreground">{formatDateTime(row.started_at)}</td>
+                <td className="px-4 py-3">{formatDuration(row.duration_s)}</td>
+                <td className="px-4 py-3 text-center">{row.turn_count}</td>
+                <td className="px-4 py-3">
+                  <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ${
+                    row.status === 'ended' ? 'bg-green-500/10 text-green-600 dark:text-green-400'
+                    : row.status === 'active' ? 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400'
+                    : 'bg-destructive/10 text-destructive'
+                  }`}>
+                    {row.status}
+                  </span>
+                </td>
+                <td className="px-4 py-3 text-right">
+                  <button
+                    onClick={() => openCall(row.id)}
+                    className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-border hover:bg-muted transition-all"
+                    title="View transcript"
+                  >
+                    <Eye className="w-4 h-4" />
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+
+      {/* Transcript drawer */}
+      {selected && (
+        <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur flex items-center justify-center p-4" onClick={() => setSelected(null)}>
+          <div className="bg-card border border-border rounded-2xl w-full max-w-2xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
+              <div>
+                <h2 className="text-base font-bold text-foreground">Call #{selected.id} transcript</h2>
+                <p className="text-xs text-muted-foreground mt-0.5">
+                  {CALL_TYPE_LABEL[selected.call_type] || selected.call_type} · {formatDateTime(selected.started_at)} · {formatDuration(selected.duration_s)}
+                </p>
+              </div>
+              <button onClick={() => setSelected(null)} className="w-8 h-8 rounded-lg border border-border hover:bg-muted flex items-center justify-center">
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+            <div className="flex-1 overflow-auto px-5 py-4 space-y-2">
+              {selected.error_message && (
+                <div className="bg-destructive/10 border border-destructive/20 rounded-xl px-3 py-2 text-xs text-destructive mb-3">
+                  Error: {selected.error_message}
+                </div>
+              )}
+              {selected.transcript.length === 0 ? (
+                <p className="text-sm text-muted-foreground text-center py-8">No transcript captured.</p>
+              ) : selected.transcript.map((t, i) => (
+                <div key={i} className={`flex ${t.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  <div className={`max-w-[80%] px-3 py-2 rounded-xl text-sm leading-relaxed ${
+                    t.role === 'user'
+                      ? 'bg-primary text-primary-foreground rounded-br-sm'
+                      : 'bg-muted border border-border text-foreground rounded-bl-sm'
+                  }`}>
+                    <span className="block text-[10px] font-bold opacity-60 mb-0.5">
+                      {t.role === 'user' ? 'User' : 'Gemini'}
+                    </span>
+                    {t.text}
+                  </div>
+                </div>
+              ))}
+            </div>
+            {selected.system_prompt && (
+              <details className="border-t border-border px-5 py-3 text-xs">
+                <summary className="cursor-pointer font-semibold text-muted-foreground">System prompt</summary>
+                <pre className="mt-2 whitespace-pre-wrap text-muted-foreground/80 max-h-32 overflow-auto">{selected.system_prompt}</pre>
+              </details>
+            )}
+          </div>
+        </div>
+      )}
+      {detailLoading && <div className="fixed bottom-4 right-4 bg-card border border-border rounded-lg px-3 py-2 text-sm shadow-lg">Loading transcript…</div>}
+    </div>
+  )
+}
+
+// ── Voices View ──────────────────────────────────────────────────────────────
+
+function VoicesView() {
+  const [playing, setPlaying] = useState<string | null>(null)
+  const [loadingVoice, setLoadingVoice] = useState<string | null>(null)
+  const [error, setError] = useState('')
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+
+  function genderLabel(g: string): string {
+    return g === 'F' ? 'Female' : g === 'M' ? 'Male' : 'Neutral'
+  }
+  function genderBadge(g: string): string {
+    if (g === 'F') return 'bg-pink-500/10 text-pink-600 dark:text-pink-400 border-pink-500/20'
+    if (g === 'M') return 'bg-sky-500/10  text-sky-600  dark:text-sky-400  border-sky-500/20'
+    return 'bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20'
+  }
+
+  async function play(name: string) {
+    setError('')
+    if (audioRef.current) {
+      audioRef.current.pause()
+      audioRef.current = null
+    }
+    if (playing === name) { setPlaying(null); return }
+
+    setLoadingVoice(name)
+    try {
+      const audio = new Audio(`${backendBase()}/api/voice-samples/${name}.wav`)
+      audioRef.current = audio
+      audio.onplaying = () => { setLoadingVoice(null); setPlaying(name) }
+      audio.onended  = () => { setPlaying(null); audioRef.current = null }
+      audio.onerror  = () => { setLoadingVoice(null); setPlaying(null); setError(`Failed to load sample for ${name}`) }
+      await audio.play()
+    } catch (e) {
+      setLoadingVoice(null)
+      setPlaying(null)
+      setError((e as Error).message || 'Playback error')
+    }
+  }
+
+  useEffect(() => () => { audioRef.current?.pause(); audioRef.current = null }, [])
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0 p-6 gap-4">
+      <div>
+        <h1 className="text-xl font-bold text-foreground">Voices</h1>
+        <p className="text-sm text-muted-foreground">
+          {VOICES.length} Gemini Live voices. Click <Play className="inline w-3.5 h-3.5 mx-0.5" /> to hear a sample (first play is generated on demand and cached).
+        </p>
+      </div>
+
+      {error && (
+        <div className="bg-destructive/10 border border-destructive/20 rounded-xl px-4 py-3 text-sm text-destructive">
+          {error}
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-3 overflow-auto pb-4">
+        {VOICES.map(v => {
+          const isPlaying = playing === v.name
+          const isLoading = loadingVoice === v.name
+          return (
+            <div
+              key={v.name}
+              className={`card flex items-center gap-3 p-3 transition-all ${isPlaying ? 'ring-2 ring-primary' : ''}`}
+            >
+              <button
+                onClick={() => play(v.name)}
+                className={`w-11 h-11 flex-shrink-0 rounded-full flex items-center justify-center transition-all ${
+                  isPlaying
+                    ? 'bg-primary text-primary-foreground'
+                    : 'bg-muted hover:bg-primary/10 text-foreground hover:text-primary border border-border'
+                }`}
+                title={isPlaying ? 'Stop' : 'Play sample'}
+              >
+                {isLoading
+                  ? <Loader2 className="w-4 h-4 animate-spin" />
+                  : isPlaying ? <X className="w-4 h-4" /> : <Play className="w-4 h-4 ml-0.5" />}
+              </button>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-1.5">
+                  <span className="font-semibold text-sm text-foreground truncate">{v.name}</span>
+                  <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold border ${genderBadge(v.gender)}`}>
+                    {genderLabel(v.gender)}
+                  </span>
+                </div>
+                <p className="text-xs text-muted-foreground truncate">{v.style}</p>
+              </div>
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
 // ── Main Page ────────────────────────────────────────────────────────────────
 
-type Mode = 'browser' | 'phone'
+type Mode = 'browser' | 'phone' | 'outbound'
+type View = 'home' | 'calls' | 'voices'
 
 export default function GeminiPage() {
+  const [view, setView] = useState<View>('home')
   const [mode, setMode] = useState<Mode>('browser')
   const [language, setLanguage] = useState('en')
   const [templateIdx, setTemplateIdx] = useState(0)
@@ -313,7 +813,51 @@ export default function GeminiPage() {
 
   return (
     <Layout>
-      <div className="max-w-screen-xl mx-auto px-4 sm:px-6 py-6 h-[calc(100vh-3.5rem)] flex flex-col gap-4">
+      <div className="flex h-[calc(100vh-3.5rem)] w-full">
+
+        {/* ─── Sidebar ─── */}
+        <aside className="w-56 flex-shrink-0 border-r border-border bg-card/40 flex flex-col py-4 px-3 gap-1">
+          <div className="px-3 py-2 mb-2">
+            <p className="text-xs uppercase tracking-wider font-bold text-muted-foreground">Gemini Live</p>
+          </div>
+          <button
+            onClick={() => setView('home')}
+            className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+              view === 'home'
+                ? 'bg-primary/10 text-primary border border-primary/20'
+                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+            }`}
+          >
+            <Home className="w-4 h-4" />
+            Home
+          </button>
+          <button
+            onClick={() => { if (inCall) hangUp(); setView('calls') }}
+            className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+              view === 'calls'
+                ? 'bg-primary/10 text-primary border border-primary/20'
+                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+            }`}
+          >
+            <ListVideo className="w-4 h-4" />
+            Calls
+          </button>
+          <button
+            onClick={() => { if (inCall) hangUp(); setView('voices') }}
+            className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+              view === 'voices'
+                ? 'bg-primary/10 text-primary border border-primary/20'
+                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+            }`}
+          >
+            <Mic2 className="w-4 h-4" />
+            Voices
+          </button>
+        </aside>
+
+        {/* ─── Main content ─── */}
+        {view === 'calls' ? <CallsView /> : view === 'voices' ? <VoicesView /> : (
+        <div className="flex-1 px-6 py-6 flex flex-col gap-4 min-w-0">
 
         {/* Page header + mode switcher */}
         <div className="flex items-center justify-between flex-wrap gap-3">
@@ -322,7 +866,7 @@ export default function GeminiPage() {
             <p className="text-sm text-muted-foreground">Real-time AI voice calls powered by Google Gemini</p>
           </div>
           <div className="flex items-center bg-muted p-1 rounded-lg border border-border gap-0.5">
-            {(['browser', 'phone'] as const).map(m => (
+            {(['browser', 'phone', 'outbound'] as const).map(m => (
               <button
                 key={m}
                 onClick={() => { if (inCall) hangUp(); setMode(m) }}
@@ -332,7 +876,7 @@ export default function GeminiPage() {
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
-                {m === 'browser' ? 'Browser Voice' : 'Phone Bridge'}
+                {m === 'browser' ? 'Browser Voice' : m === 'phone' ? 'Phone Bridge' : 'Outbound Call'}
               </button>
             ))}
           </div>
@@ -343,7 +887,7 @@ export default function GeminiPage() {
 
           {/* LEFT — config panel (only in browser mode) */}
           {mode === 'browser' && (
-            <div className="w-80 flex-shrink-0 flex flex-col gap-4">
+            <div className="w-[36rem] flex-shrink-0 flex flex-col gap-4">
               <div className="card flex flex-col gap-4 flex-1">
                 <h2 className="text-sm font-bold text-foreground uppercase tracking-wide">Agent Config</h2>
 
@@ -506,7 +1050,7 @@ export default function GeminiPage() {
                   </div>
                 )}
               </>
-            ) : (
+            ) : mode === 'phone' ? (
               <div className="w-full flex flex-col items-center justify-center flex-1">
                 <div className="text-center mb-6">
                   <div className="w-20 h-20 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center mx-auto mb-4 shadow-2xl">
@@ -517,9 +1061,15 @@ export default function GeminiPage() {
                 </div>
                 <PhoneDialer />
               </div>
+            ) : (
+              <div className="w-full flex flex-col items-center justify-start flex-1 overflow-y-auto">
+                <OutboundDialer />
+              </div>
             )}
           </div>
         </div>
+        </div>
+        )}
       </div>
     </Layout>
   )
