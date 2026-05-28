@@ -19,9 +19,14 @@ function getWsUrl(): string {
   const token = localStorage.getItem('access_token') || ''
   const tokenParam = token ? `?token=${encodeURIComponent(token)}` : ''
   if (base && !base.includes('host.docker.internal')) {
-    return base.replace(/^https?/, proto.slice(0, -1)) + '/gemini/ws' + tokenParam
+    return base.replace(/^https?/, proto.slice(0, -1)) + '/api/gemini/ws' + tokenParam
   }
-  return `${proto}//${window.location.hostname}:8000/gemini/ws${tokenParam}`
+  // Production (behind reverse proxy): same origin, no port.
+  // Local dev only: hit backend directly on :8000.
+  const host = window.location.hostname
+  const isLocal = host === 'localhost' || host === '127.0.0.1'
+  const authority = isLocal ? `${host}:8000` : window.location.host
+  return `${proto}//${authority}/api/gemini/ws${tokenParam}`
 }
 
 function int16ToFloat32(buf: ArrayBuffer) {
@@ -34,7 +39,7 @@ function int16ToFloat32(buf: ArrayBuffer) {
   return f32
 }
 
-export default function useGeminiVoice(systemPrompt = '', language = 'en', voice = 'Aoede') {
+export default function useGeminiVoice(systemPrompt = '', language = 'en', voice = 'Aoede', toolIds: number[] = []) {
   const [status, setStatus] = useState<GeminiStatus>('idle')
   const [inCall, setInCall] = useState(false)
   const [isConnected, setIsConnected] = useState(false)
@@ -54,10 +59,12 @@ export default function useGeminiVoice(systemPrompt = '', language = 'en', voice
   const systemPromptRef = useRef(systemPrompt)
   const languageRef = useRef(language)
   const voiceRef = useRef(voice)
+  const toolIdsRef = useRef(toolIds)
 
   useEffect(() => { systemPromptRef.current = systemPrompt }, [systemPrompt])
   useEffect(() => { languageRef.current = language }, [language])
   useEffect(() => { voiceRef.current = voice }, [voice])
+  useEffect(() => { toolIdsRef.current = toolIds }, [toolIds])
   useEffect(() => { inCallRef.current = inCall }, [inCall])
 
   function appendTranscript(role: 'user' | 'model', text: string) {
@@ -113,6 +120,7 @@ export default function useGeminiVoice(systemPrompt = '', language = 'en', voice
         system_prompt: systemPromptRef.current,
         language: languageRef.current,
         voice: voiceRef.current,
+        tool_ids: toolIdsRef.current,
       }))
       onOpenCb()
     }

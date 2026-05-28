@@ -8,11 +8,11 @@ from fastapi import APIRouter, Depends, Response
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from ..db import get_db
-from ..models.api_key import UserAPIKey
-from ..models.user import User, UserRole
-from ..services.encryption import decrypt_key
-from .auth import get_current_user
+from ...db import get_db
+from ...models.api_key import UserAPIKey
+from ...models.user import User, UserRole
+from ...services.encryption import decrypt_key
+from ...routes.auth import get_current_user
 
 logger = logging.getLogger("ultravox")
 
