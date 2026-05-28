@@ -35,6 +35,9 @@ class AgentCreate(BaseModel):
     language: constr(strip_whitespace=True, min_length=1, max_length=16) = "en"
     voice: constr(strip_whitespace=True, min_length=1, max_length=64) = "Aoede"
     tool_ids: list[int] = []
+    ambient_always: Optional[constr(strip_whitespace=True, max_length=64)] = None
+    ambient_tool_call: Optional[constr(strip_whitespace=True, max_length=64)] = None
+    ambient_volume: Optional[float] = Field(default=0.15, ge=0.0, le=1.0)
 
 
 class AgentUpdate(BaseModel):
@@ -44,6 +47,9 @@ class AgentUpdate(BaseModel):
     language: Optional[constr(strip_whitespace=True, min_length=1, max_length=16)] = None
     voice: Optional[constr(strip_whitespace=True, min_length=1, max_length=64)] = None
     tool_ids: Optional[list[int]] = None
+    ambient_always: Optional[str] = None
+    ambient_tool_call: Optional[str] = None
+    ambient_volume: Optional[float] = Field(default=None, ge=0.0, le=1.0)
 
 
 _SLUG_RE = re.compile(r"[^a-z0-9]+")
@@ -64,6 +70,9 @@ def _serialize(row: GeminiAgent) -> dict:
         "language": row.language,
         "voice": row.voice,
         "tool_ids": list(row.tool_ids or []),
+        "ambient_always":    row.ambient_always,
+        "ambient_tool_call": row.ambient_tool_call,
+        "ambient_volume":    row.ambient_volume,
         "is_builtin": row.is_builtin,
         "is_default_phone": row.is_default_phone,
         "created_at": row.created_at.isoformat() + "Z" if row.created_at else None,
@@ -97,6 +106,9 @@ async def create_agent(body: AgentCreate, db: AsyncSession = Depends(get_db)):
         language=body.language,
         voice=body.voice,
         tool_ids=list(body.tool_ids or []),
+        ambient_always=body.ambient_always or None,
+        ambient_tool_call=body.ambient_tool_call or None,
+        ambient_volume=body.ambient_volume if body.ambient_volume is not None else 0.15,
         is_builtin=False,
         is_default_phone=False,
     )

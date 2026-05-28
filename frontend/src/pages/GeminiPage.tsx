@@ -1,6 +1,8 @@
 import { useState, useEffect, useRef, useCallback, type ComponentType, type ReactNode } from 'react'
+import { useQuery } from '@tanstack/react-query'
+import api from '../api/client'
 import { Device, Call } from '@twilio/voice-sdk'
-import { Phone, PhoneOff, Mic, MicOff, ChevronDown, Settings, Home, ListVideo, Eye, X, RefreshCw, Play, Loader2, Mic2, FileCode, ArrowRight, Globe, Cloud, Server, Cpu, PhoneCall, Wrench, Bot, Plus, Pencil, Trash2, Star, Lock, Webhook, FlaskConical } from 'lucide-react'
+import { Phone, PhoneOff, Mic, MicOff, ChevronDown, Settings, Home, ListVideo, Eye, X, RefreshCw, Play, Loader2, Mic2, FileCode, ArrowRight, Globe, Cloud, Server, Cpu, PhoneCall, Wrench, Bot, Plus, Pencil, Trash2, Star, Lock, Webhook, FlaskConical, IndianRupee, Volume2, VolumeX, ArrowLeft, Music } from 'lucide-react'
 import Layout from '../components/Layout'
 import useGeminiVoice, { type GeminiStatus } from '../hooks/useGeminiVoice'
 import { useUIStore } from '../store/uiStore'
@@ -10,7 +12,13 @@ import { useUIStore } from '../store/uiStore'
 function backendBase(): string {
   const raw = (import.meta.env.VITE_BACKEND_URL as string | undefined) || ''
   if (raw && !raw.includes('host.docker.internal')) return raw
-  return `${window.location.protocol}//${window.location.hostname}:8000`
+  // Local dev: frontend on :3000, backend on :8000 → explicit port needed.
+  // Production: nginx reverse-proxies /api/* on the same origin → no port.
+  const h = window.location.hostname
+  if (h === 'localhost' || h === '127.0.0.1') {
+    return `${window.location.protocol}//${h}:8000`
+  }
+  return window.location.origin
 }
 
 function formatDateTime(iso: string | null): string {
@@ -28,7 +36,10 @@ function formatDuration(s: number | null): string {
   return `${m}m ${r}s`
 }
 
-type AgentTemplate = { label: string; prompt: string; voice?: string; language?: string; tool_ids?: number[] }
+type AgentTemplate = {
+  label: string; prompt: string; voice?: string; language?: string; tool_ids?: number[]
+  ambient_always?: string | null; ambient_tool_call?: string | null; ambient_volume?: number
+}
 
 let _agentTemplatesCache: AgentTemplate[] | null = null
 
@@ -43,6 +54,8 @@ function useAgentTemplates(fallback: AgentTemplate[]): AgentTemplate[] {
         const mapped: AgentTemplate[] = (body.items || []).map((a: Agent) => ({
           label: a.name, prompt: a.system_prompt, voice: a.voice, language: a.language,
           tool_ids: a.tool_ids || [],
+          ambient_always: a.ambient_always, ambient_tool_call: a.ambient_tool_call,
+          ambient_volume: a.ambient_volume,
         }))
         if (mapped.length) {
           _agentTemplatesCache = mapped
@@ -205,6 +218,7 @@ type TwilioConfig = {
   voice_webhook_method: string
   stream_ws_url: string
   twiml_app_sid: string | null
+  phone_number: string | null
   missing_env: string[]
 }
 
@@ -260,6 +274,32 @@ function TwilioConfigCard() {
       {cfg.missing_env.length > 0 && (
         <div className="bg-yellow-500/10 border border-yellow-500/25 rounded-lg px-3 py-2 text-xs text-yellow-700 dark:text-yellow-400">
           Missing env vars on the backend: <code className="font-mono">{cfg.missing_env.join(', ')}</code>
+        </div>
+      )}
+
+      {cfg.phone_number && (
+        <div className="bg-gradient-to-br from-primary/10 to-primary/5 border border-primary/25 rounded-xl px-4 py-4 flex flex-col sm:flex-row sm:items-center gap-3">
+          <div className="w-11 h-11 rounded-full bg-primary/15 flex items-center justify-center flex-shrink-0">
+            <PhoneCall className="w-5 h-5 text-primary" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-semibold uppercase tracking-wide text-primary">Call our agent</p>
+            <a
+              href={`tel:${cfg.phone_number}`}
+              className="block text-xl font-bold font-mono text-foreground hover:underline mt-0.5"
+            >
+              {cfg.phone_number}
+            </a>
+            <p className="text-xs text-muted-foreground mt-1">
+              Dial this Twilio number from any phone to talk to the AI voice agent live.
+            </p>
+          </div>
+          <button
+            onClick={() => copy('phone', cfg.phone_number!)}
+            className="px-3 py-2 rounded-lg border border-border bg-background hover:bg-muted text-xs font-medium whitespace-nowrap"
+          >
+            {copiedField === 'phone' ? 'Copied ✓' : 'Copy number'}
+          </button>
         </div>
       )}
 
@@ -437,6 +477,9 @@ function OutboundDialer() {
   const [language, setLanguage] = useState(templates[0]?.language || 'en')
   const [voice, setVoice] = useState(templates[0]?.voice || 'Aoede')
   const [toolIds, setToolIds] = useState<number[]>(templates[0]?.tool_ids || [])
+  const [ambientAlways, setAmbientAlways] = useState<string | null>(templates[0]?.ambient_always ?? null)
+  const [ambientToolCall, setAmbientToolCall] = useState<string | null>(templates[0]?.ambient_tool_call ?? null)
+  const [ambientVolume, setAmbientVolume] = useState<number>(templates[0]?.ambient_volume ?? 0.15)
   const [busy, setBusy] = useState(false)
   const [status, setStatus] = useState<{ kind: 'idle' | 'ok' | 'error'; msg: string }>({ kind: 'idle', msg: '' })
 
@@ -455,6 +498,9 @@ function OutboundDialer() {
       if (t.voice) setVoice(t.voice)
       if (t.language) setLanguage(t.language)
       setToolIds(t.tool_ids || [])
+      setAmbientAlways(t.ambient_always ?? null)
+      setAmbientToolCall(t.ambient_tool_call ?? null)
+      setAmbientVolume(t.ambient_volume ?? 0.15)
     }
   }
 
@@ -484,7 +530,10 @@ function OutboundDialer() {
           'Content-Type': 'application/json',
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
-        body: JSON.stringify({ to, system_prompt: systemPrompt, language, voice, tool_ids: toolIds }),
+        body: JSON.stringify({
+          to, system_prompt: systemPrompt, language, voice, tool_ids: toolIds,
+          ambient_always: ambientAlways, ambient_tool_call: ambientToolCall, ambient_volume: ambientVolume,
+        }),
       })
       const body = await res.json().catch(() => ({}))
       if (!res.ok) {
@@ -1273,11 +1322,13 @@ function ToolsView() {
         parameters: draft.parameters,
         response_schema: draft.response_schema,
         headers,
+        // URL & method are editable on built-ins too — empty URL keeps the
+        // Python implementation, any URL switches dispatch to HTTP.
+        http_method: draft.http_method,
+        url: draft.url,
       }
       if (!editing?.is_builtin) {
         body.name = draft.name
-        body.http_method = draft.http_method
-        body.url = draft.url
       }
       const url = editing ? `${backendBase()}/api/tools/${editing.id}` : `${backendBase()}/api/tools/`
       const method = editing ? 'PATCH' : 'POST'
@@ -1550,6 +1601,9 @@ type Agent = {
   language: string
   voice: string
   tool_ids: number[]
+  ambient_always: string | null
+  ambient_tool_call: string | null
+  ambient_volume: number
   is_builtin: boolean
   is_default_phone: boolean
   created_at: string | null
@@ -1563,15 +1617,25 @@ type AgentDraft = {
   language: string
   voice: string
   tool_ids: number[]
+  ambient_always: string | null
+  ambient_tool_call: string | null
+  ambient_volume: number
 }
 
 function emptyDraft(): AgentDraft {
-  return { name: '', description: '', system_prompt: '', language: 'en', voice: 'Aoede', tool_ids: [] }
+  return {
+    name: '', description: '', system_prompt: '',
+    language: 'en', voice: 'Aoede', tool_ids: [],
+    ambient_always: null, ambient_tool_call: null, ambient_volume: 0.15,
+  }
 }
+
+type Ambience = { slug: string; label: string; category: string; description: string }
 
 function AgentsView() {
   const [items, setItems] = useState<Agent[]>([])
   const [allTools, setAllTools] = useState<Tool[]>([])
+  const [ambience, setAmbience] = useState<Ambience[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [editing, setEditing] = useState<Agent | null>(null)
@@ -1583,12 +1647,14 @@ function AgentsView() {
     setLoading(true)
     setError('')
     try {
-      const [a, t] = await Promise.all([
+      const [a, t, amb] = await Promise.all([
         fetch(`${backendBase()}/api/agents/`).then(r => r.ok ? r.json() : Promise.reject(`agents ${r.status}`)),
         fetch(`${backendBase()}/api/tools/`).then(r => r.ok ? r.json() : Promise.reject(`tools ${r.status}`)),
+        fetch(`${backendBase()}/api/ambience/`).then(r => r.ok ? r.json() : { items: [] }).catch(() => ({ items: [] })),
       ])
       setItems(a.items || [])
       setAllTools(t.items || [])
+      setAmbience(amb.items || [])
     } catch (e) {
       setError(String(e))
     } finally {
@@ -1611,6 +1677,9 @@ function AgentsView() {
       language: a.language,
       voice: a.voice,
       tool_ids: [...(a.tool_ids || [])],
+      ambient_always: a.ambient_always,
+      ambient_tool_call: a.ambient_tool_call,
+      ambient_volume: a.ambient_volume ?? 0.15,
     })
     setEditing(a)
   }
@@ -1622,7 +1691,7 @@ function AgentsView() {
     }))
   }
 
-  function closeModal() {
+  function closeEditor() {
     setCreating(false)
     setEditing(null)
   }
@@ -1644,6 +1713,9 @@ function AgentsView() {
             language: draft.language,
             voice: draft.voice,
             tool_ids: draft.tool_ids,
+            ambient_always: draft.ambient_always,
+            ambient_tool_call: draft.ambient_tool_call,
+            ambient_volume: draft.ambient_volume,
             ...(editing.is_builtin ? {} : { name: draft.name }),
           }
         : draft
@@ -1656,7 +1728,7 @@ function AgentsView() {
         const data = await res.json().catch(() => ({}))
         throw new Error(data.detail || `Failed: ${res.status}`)
       }
-      closeModal()
+      closeEditor()
       await load()
     } catch (e) {
       setError((e as Error).message)
@@ -1692,6 +1764,24 @@ function AgentsView() {
     } catch (e) {
       setError((e as Error).message)
     }
+  }
+
+  // ─── Full-page editor (replaces the list when creating/editing) ───
+  if (creating || editing) {
+    return (
+      <AgentEditor
+        editing={editing}
+        draft={draft}
+        setDraft={setDraft}
+        allTools={allTools}
+        ambience={ambience}
+        toggleTool={toggleTool}
+        saving={saving}
+        error={error}
+        onCancel={closeEditor}
+        onSave={save}
+      />
+    )
   }
 
   return (
@@ -1788,133 +1878,318 @@ function AgentsView() {
         ))}
       </div>
 
-      {/* Create/Edit modal */}
-      {(creating || editing) && (
-        <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur flex items-center justify-center p-4" onClick={closeModal}>
-          <div className="bg-card border border-border rounded-2xl w-full max-w-2xl max-h-[90vh] flex flex-col" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-              <h2 className="text-base font-bold text-foreground">{editing ? `Edit "${editing.name}"` : 'New Agent'}</h2>
-              <button onClick={closeModal} className="w-8 h-8 rounded-lg border border-border hover:bg-muted flex items-center justify-center">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
+    </div>
+  )
+}
 
-            <div className="flex-1 overflow-auto px-5 py-4 space-y-3">
-              <div>
-                <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1.5 block">Name</label>
-                <input
-                  type="text"
-                  value={draft.name}
-                  onChange={e => setDraft({ ...draft, name: e.target.value })}
-                  disabled={editing?.is_builtin}
-                  className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary disabled:opacity-50"
-                  placeholder="e.g. Pizza Order Taker"
-                />
-                {editing?.is_builtin && <p className="text-[11px] text-muted-foreground mt-1">Name is locked for built-in agents.</p>}
-              </div>
+// ── Agent editor (full-page, replaces the agents list while open) ────────────
 
-              <div>
-                <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1.5 block">Description</label>
-                <input
-                  type="text"
-                  value={draft.description}
-                  onChange={e => setDraft({ ...draft, description: e.target.value })}
-                  className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
-                  placeholder="Short one-liner shown on the agent card"
-                />
-              </div>
+type AgentEditorProps = {
+  editing: Agent | null
+  draft: AgentDraft
+  setDraft: (d: AgentDraft | ((p: AgentDraft) => AgentDraft)) => void
+  allTools: Tool[]
+  ambience: Ambience[]
+  toggleTool: (id: number) => void
+  saving: boolean
+  error: string
+  onCancel: () => void
+  onSave: () => void
+}
 
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1.5 block">Language</label>
-                  <div className="relative">
-                    <select
-                      value={draft.language}
-                      onChange={e => setDraft({ ...draft, language: e.target.value })}
-                      className="w-full appearance-none bg-background border border-border rounded-lg px-3 py-2 text-sm pr-8 focus:outline-none focus:border-primary"
-                    >
-                      {LANGUAGES.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}
-                    </select>
-                    <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
-                  </div>
-                </div>
-                <div>
-                  <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1.5 block">Voice</label>
-                  <div className="relative">
-                    <select
-                      value={draft.voice}
-                      onChange={e => setDraft({ ...draft, voice: e.target.value })}
-                      className="w-full appearance-none bg-background border border-border rounded-lg px-3 py-2 text-sm pr-8 focus:outline-none focus:border-primary"
-                    >
-                      {VOICES.map(v => <option key={v.name} value={v.name}>{v.name} ({v.gender}) — {v.style}</option>)}
-                    </select>
-                    <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
-                  </div>
-                </div>
-              </div>
+function AmbiencePicker({ label, hint, value, volume, options, onChange }: {
+  label: string
+  hint: string
+  value: string | null
+  volume: number
+  options: Ambience[]
+  onChange: (slug: string | null) => void
+}) {
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const [previewing, setPreviewing] = useState<string | null>(null)
 
-              <div>
-                <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1.5 block">System Prompt</label>
-                <textarea
-                  value={draft.system_prompt}
-                  onChange={e => setDraft({ ...draft, system_prompt: e.target.value })}
-                  rows={12}
-                  className="w-full bg-muted/30 border border-border rounded-lg px-3 py-2 text-xs font-mono leading-relaxed focus:outline-none focus:border-primary resize-y"
-                  placeholder="You are a helpful assistant…"
-                />
-              </div>
+  // Keep any in-flight preview in sync with live volume changes.
+  useEffect(() => {
+    if (audioRef.current) audioRef.current.volume = Math.max(0, Math.min(1, volume))
+  }, [volume])
 
-              <div>
-                <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1.5 block">
-                  Tools <span className="opacity-60 normal-case">({draft.tool_ids.length} selected — the agent can call these if the LLM decides to)</span>
-                </label>
-                {allTools.length === 0 ? (
-                  <p className="text-[11px] text-muted-foreground italic">No tools defined yet. Create some in the Tools tab.</p>
-                ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 max-h-56 overflow-auto border border-border rounded-lg p-2 bg-muted/20">
-                    {allTools.map((t: Tool) => {
-                      const checked = draft.tool_ids.includes(t.id)
-                      return (
-                        <label key={t.id}
-                          className={`flex items-start gap-2 px-2 py-1.5 rounded-md cursor-pointer transition-all ${
-                            checked ? 'bg-primary/10 border border-primary/30' : 'border border-transparent hover:bg-muted/40'
-                          }`}>
-                          <input type="checkbox" checked={checked} onChange={() => toggleTool(t.id)} className="mt-0.5" />
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-1.5">
-                              <Webhook className="w-3 h-3 text-primary flex-shrink-0" />
-                              <span className="text-xs font-bold text-foreground truncate">{t.name}</span>
-                              {t.is_builtin && <span className="text-[9px] font-bold text-blue-600 dark:text-blue-400">BUILTIN</span>}
-                            </div>
-                            <p className="text-[11px] text-muted-foreground line-clamp-2 mt-0.5">{t.description}</p>
-                          </div>
-                        </label>
-                      )
-                    })}
-                  </div>
-                )}
-              </div>
-            </div>
+  function previewSlug(slug: string) {
+    if (audioRef.current) {
+      audioRef.current.pause()
+      audioRef.current = null
+    }
+    if (previewing === slug) {
+      setPreviewing(null)
+      return
+    }
+    const audio = new Audio(`${backendBase()}/api/ambience/preview/${slug}.wav`)
+    audio.volume = Math.max(0, Math.min(1, volume))
+    audioRef.current = audio
+    audio.onended = () => { setPreviewing(null); audioRef.current = null }
+    audio.onerror = () => { setPreviewing(null); audioRef.current = null }
+    setPreviewing(slug)
+    audio.play().catch(() => setPreviewing(null))
+  }
 
-            <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
+  useEffect(() => () => { audioRef.current?.pause(); audioRef.current = null }, [])
+
+  return (
+    <div className="flex flex-col gap-2">
+      <div>
+        <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground block">{label}</label>
+        <p className="text-[11px] text-muted-foreground mt-0.5">{hint}</p>
+      </div>
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+        <button
+          type="button"
+          onClick={() => onChange(null)}
+          className={`flex items-center gap-2 px-3 py-2 rounded-lg border text-left text-xs font-medium transition-all ${
+            value == null
+              ? 'bg-primary/10 border-primary/30 text-foreground'
+              : 'border-border hover:bg-muted/50 text-muted-foreground'
+          }`}
+        >
+          <VolumeX className="w-3.5 h-3.5 flex-shrink-0" />
+          <span>None (silent)</span>
+        </button>
+        {options.map(o => {
+          const selected = value === o.slug
+          const playing = previewing === o.slug
+          return (
+            <div
+              key={o.slug}
+              className={`flex items-center gap-2 px-2.5 py-2 rounded-lg border text-left text-xs transition-all ${
+                selected ? 'bg-primary/10 border-primary/30' : 'border-border hover:bg-muted/40'
+              }`}
+            >
               <button
-                onClick={closeModal}
-                className="px-4 py-2 rounded-lg border border-border hover:bg-muted text-sm font-medium"
+                type="button"
+                onClick={() => onChange(o.slug)}
+                className="flex-1 min-w-0 flex items-center gap-2"
+                title={o.description}
               >
-                Cancel
+                <Music className="w-3.5 h-3.5 text-primary flex-shrink-0" />
+                <span className="font-semibold text-foreground truncate">{o.label}</span>
               </button>
               <button
-                onClick={save}
-                disabled={saving}
-                className="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 inline-flex items-center gap-2"
+                type="button"
+                onClick={() => previewSlug(o.slug)}
+                className={`w-7 h-7 flex-shrink-0 rounded-md border flex items-center justify-center transition-all ${
+                  playing
+                    ? 'bg-primary text-primary-foreground border-primary'
+                    : 'border-border hover:bg-muted text-muted-foreground'
+                }`}
+                title={playing ? 'Stop preview' : 'Preview'}
               >
-                {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
-                {editing ? 'Save changes' : 'Create agent'}
+                {playing ? <X className="w-3.5 h-3.5" /> : <Play className="w-3 h-3 ml-0.5" />}
               </button>
             </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
+
+function AgentEditor({ editing, draft, setDraft, allTools, ambience, toggleTool, saving, error, onCancel, onSave }: AgentEditorProps) {
+  const alwaysOptions   = ambience.filter(a => a.category === 'always' || a.category === 'both')
+  const toolCallOptions = ambience.filter(a => a.category === 'tool_call' || a.category === 'both')
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0 overflow-y-auto">
+      {/* Sticky header */}
+      <div className="sticky top-0 z-10 bg-card/80 backdrop-blur border-b border-border px-6 py-3 flex items-center justify-between gap-3">
+        <div className="flex items-center gap-3 min-w-0">
+          <button
+            onClick={onCancel}
+            className="w-9 h-9 rounded-lg border border-border hover:bg-muted flex items-center justify-center flex-shrink-0"
+            title="Back to agents"
+          >
+            <ArrowLeft className="w-4 h-4" />
+          </button>
+          <div className="min-w-0">
+            <h1 className="text-lg font-bold text-foreground truncate">
+              {editing ? `Edit "${editing.name}"` : 'New Agent'}
+            </h1>
+            <p className="text-xs text-muted-foreground">
+              {editing
+                ? <>Updating <code className="font-mono">#{editing.slug}</code></>
+                : 'Configure prompt, voice, tools, and background ambience'}
+            </p>
           </div>
         </div>
-      )}
+        <div className="flex items-center gap-2 flex-shrink-0">
+          <button
+            onClick={onCancel}
+            className="px-4 py-2 rounded-lg border border-border hover:bg-muted text-sm font-medium"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={onSave}
+            disabled={saving}
+            className="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 inline-flex items-center gap-2"
+          >
+            {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+            {editing ? 'Save changes' : 'Create agent'}
+          </button>
+        </div>
+      </div>
+
+      <div className="px-6 py-5 max-w-5xl w-full mx-auto flex flex-col gap-5">
+        {error && (
+          <div className="bg-destructive/10 border border-destructive/20 rounded-xl px-4 py-3 text-sm text-destructive">
+            {error}
+          </div>
+        )}
+
+        {/* ─── Basics ─── */}
+        <section className="card flex flex-col gap-3">
+          <h2 className="text-sm font-bold uppercase tracking-wide text-foreground">Basics</h2>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1.5 block">Name</label>
+              <input
+                type="text"
+                value={draft.name}
+                onChange={e => setDraft({ ...draft, name: e.target.value })}
+                disabled={editing?.is_builtin}
+                className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary disabled:opacity-50"
+                placeholder="e.g. Pizza Order Taker"
+              />
+              {editing?.is_builtin && <p className="text-[11px] text-muted-foreground mt-1">Name is locked for built-in agents.</p>}
+            </div>
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1.5 block">Description</label>
+              <input
+                type="text"
+                value={draft.description}
+                onChange={e => setDraft({ ...draft, description: e.target.value })}
+                className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
+                placeholder="Short one-liner shown on the agent card"
+              />
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1.5 block">Language</label>
+              <div className="relative">
+                <select
+                  value={draft.language}
+                  onChange={e => setDraft({ ...draft, language: e.target.value })}
+                  className="w-full appearance-none bg-background border border-border rounded-lg px-3 py-2 text-sm pr-8 focus:outline-none focus:border-primary"
+                >
+                  {LANGUAGES.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}
+                </select>
+                <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+              </div>
+            </div>
+            <div>
+              <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1.5 block">Voice</label>
+              <div className="relative">
+                <select
+                  value={draft.voice}
+                  onChange={e => setDraft({ ...draft, voice: e.target.value })}
+                  className="w-full appearance-none bg-background border border-border rounded-lg px-3 py-2 text-sm pr-8 focus:outline-none focus:border-primary"
+                >
+                  {VOICES.map(v => <option key={v.name} value={v.name}>{v.name} ({v.gender}) — {v.style}</option>)}
+                </select>
+                <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
+              </div>
+            </div>
+          </div>
+        </section>
+
+        {/* ─── System prompt ─── */}
+        <section className="card flex flex-col gap-3">
+          <h2 className="text-sm font-bold uppercase tracking-wide text-foreground">System Prompt</h2>
+          <textarea
+            value={draft.system_prompt}
+            onChange={e => setDraft({ ...draft, system_prompt: e.target.value })}
+            rows={14}
+            className="w-full bg-muted/30 border border-border rounded-lg px-3 py-2 text-xs font-mono leading-relaxed focus:outline-none focus:border-primary resize-y"
+            placeholder="You are a helpful assistant…"
+          />
+        </section>
+
+        {/* ─── Tools ─── */}
+        <section className="card flex flex-col gap-3">
+          <h2 className="text-sm font-bold uppercase tracking-wide text-foreground">
+            Tools <span className="text-[11px] font-normal text-muted-foreground normal-case ml-1">({draft.tool_ids.length} selected — Gemini decides when to call them)</span>
+          </h2>
+          {allTools.length === 0 ? (
+            <p className="text-[11px] text-muted-foreground italic">No tools defined yet. Create some in the Tools tab.</p>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+              {allTools.map((t: Tool) => {
+                const checked = draft.tool_ids.includes(t.id)
+                return (
+                  <label key={t.id}
+                    className={`flex items-start gap-2 px-2.5 py-2 rounded-md cursor-pointer transition-all border ${
+                      checked ? 'bg-primary/10 border-primary/30' : 'border-border hover:bg-muted/40'
+                    }`}>
+                    <input type="checkbox" checked={checked} onChange={() => toggleTool(t.id)} className="mt-0.5" />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <Webhook className="w-3 h-3 text-primary flex-shrink-0" />
+                        <span className="text-xs font-bold text-foreground truncate">{t.name}</span>
+                        {t.is_builtin && <span className="text-[9px] font-bold text-blue-600 dark:text-blue-400">BUILTIN</span>}
+                      </div>
+                      <p className="text-[11px] text-muted-foreground line-clamp-2 mt-0.5">{t.description}</p>
+                    </div>
+                  </label>
+                )
+              })}
+            </div>
+          )}
+        </section>
+
+        {/* ─── Background ambience ─── */}
+        <section className="card flex flex-col gap-4">
+          <div className="flex items-start justify-between gap-3 flex-wrap">
+            <div>
+              <h2 className="text-sm font-bold uppercase tracking-wide text-foreground flex items-center gap-2">
+                <Volume2 className="w-4 h-4" /> Background Ambience
+              </h2>
+              <p className="text-xs text-muted-foreground mt-0.5">
+                Mixed into the agent's outgoing audio (browser, Twilio, Vobiz). Click <Play className="inline w-3 h-3 mx-0.5" /> to preview.
+              </p>
+            </div>
+            <div className="flex items-center gap-3">
+              <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Volume</label>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={draft.ambient_volume}
+                onChange={e => setDraft({ ...draft, ambient_volume: parseFloat(e.target.value) })}
+                className="w-40 accent-primary"
+              />
+              <span className="text-xs font-mono text-foreground w-10 text-right">{Math.round(draft.ambient_volume * 100)}%</span>
+            </div>
+          </div>
+
+          <AmbiencePicker
+            label="Always-on ambience"
+            hint="Plays softly under the entire conversation (e.g. office hum, cafe)."
+            value={draft.ambient_always}
+            volume={draft.ambient_volume}
+            options={alwaysOptions}
+            onChange={slug => setDraft({ ...draft, ambient_always: slug })}
+          />
+
+          <AmbiencePicker
+            label="During tool calls"
+            hint="Plays only while the agent is dispatching a tool (e.g. typing, mouse clicks)."
+            value={draft.ambient_tool_call}
+            volume={draft.ambient_volume}
+            options={toolCallOptions}
+            onChange={slug => setDraft({ ...draft, ambient_tool_call: slug })}
+          />
+        </section>
+      </div>
     </div>
   )
 }
@@ -1922,7 +2197,289 @@ function AgentsView() {
 // ── Main Page ────────────────────────────────────────────────────────────────
 
 type Mode = 'browser' | 'phone' | 'outbound'
-type View = 'home' | 'calls' | 'voices' | 'techspecs' | 'agents' | 'tools'
+// ── Costing View ─────────────────────────────────────────────────────────────
+
+function CostingField({ label, value, onChange, step = 1, min = 0, suffix }: {
+  label: string; value: number; onChange: (n: number) => void; step?: number; min?: number; suffix?: string
+}) {
+  return (
+    <div className="flex flex-col gap-1">
+      <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">{label}</label>
+      <div className="flex items-center gap-2">
+        <input
+          type="number"
+          value={value}
+          min={min}
+          step={step}
+          onChange={e => onChange(Number(e.target.value) || 0)}
+          className="flex-1 bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary"
+        />
+        {suffix && <span className="text-xs text-muted-foreground whitespace-nowrap">{suffix}</span>}
+      </div>
+    </div>
+  )
+}
+
+function CostingView() {
+  const { data: fxData } = useQuery({
+    queryKey: ['fx-rate'],
+    queryFn: () => api.get('/fx-rate').then(r => r.data),
+    staleTime: 3_600_000,
+  })
+
+  const [hoursPerDay, setHoursPerDay] = useState(2)
+  const [daysPerMonth, setDaysPerMonth] = useState(30)
+  const [geminiUsdPerMin, setGeminiUsdPerMin] = useState(0.03)
+  const [telephonyInrPerMin, setTelephonyInrPerMin] = useState(0.5)
+  const [usdToInr, setUsdToInr] = useState(83)
+  const [fxOverridden, setFxOverridden] = useState(false)
+  const [includeTelephony, setIncludeTelephony] = useState(false)
+
+  // Adopt the live FX rate from the navbar query unless the user has manually overridden.
+  useEffect(() => {
+    if (!fxOverridden && fxData?.rate > 0) {
+      setUsdToInr(fxData.rate)
+    }
+  }, [fxData, fxOverridden])
+
+  const minutesPerMonth = hoursPerDay * 60 * daysPerMonth
+  const geminiInrPerMin = geminiUsdPerMin * usdToInr
+  const perMinInr = geminiInrPerMin + (includeTelephony ? telephonyInrPerMin : 0)
+  const monthlyInr = perMinInr * minutesPerMonth
+  const dailyInr = perMinInr * hoursPerDay * 60
+
+  const fmtInr = (n: number) =>
+    new Intl.NumberFormat('en-IN', { maximumFractionDigits: 0 }).format(Math.round(n))
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0 p-6 gap-4 overflow-y-auto">
+      <div>
+        <h1 className="text-xl font-bold text-foreground">Costing</h1>
+        <p className="text-sm text-muted-foreground">
+          Estimate monthly cost of the voice agent in Indian rupees based on daily usage.
+        </p>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+        <div className="card flex flex-col gap-4">
+          <h2 className="text-sm font-bold uppercase tracking-wide text-foreground">Usage</h2>
+          <div className="grid grid-cols-2 gap-3">
+            <CostingField label="Hours / day" value={hoursPerDay} onChange={setHoursPerDay} step={0.5} suffix="hrs" />
+            <CostingField label="Days / month" value={daysPerMonth} onChange={setDaysPerMonth} step={1} suffix="days" />
+          </div>
+
+          <h2 className="text-sm font-bold uppercase tracking-wide text-foreground mt-2">Rates</h2>
+          <div className="grid grid-cols-2 gap-3">
+            <CostingField label="Gemini Live" value={geminiUsdPerMin} onChange={setGeminiUsdPerMin} step={0.01} suffix="$ / min" />
+            <div className="flex flex-col gap-1">
+              <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide flex items-center justify-between">
+                <span>USD → INR</span>
+                {fxOverridden && (
+                  <button
+                    type="button"
+                    onClick={() => { setFxOverridden(false); if (fxData?.rate > 0) setUsdToInr(fxData.rate) }}
+                    className="text-[10px] font-semibold text-primary hover:underline normal-case tracking-normal"
+                  >
+                    use live
+                  </button>
+                )}
+              </label>
+              <div className="flex items-center gap-2">
+                <input
+                  type="number"
+                  value={usdToInr}
+                  min={0}
+                  step={0.5}
+                  onChange={e => { setFxOverridden(true); setUsdToInr(Number(e.target.value) || 0) }}
+                  className="flex-1 bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground focus:outline-none focus:border-primary"
+                />
+                <span className="text-xs text-muted-foreground whitespace-nowrap">₹</span>
+              </div>
+              <span className="text-[10px] text-muted-foreground">
+                {fxOverridden
+                  ? 'Manual override'
+                  : fxData?.rate > 0
+                    ? <>Live rate from navbar{fxData?.date ? ` · ${fxData.date}` : ''}</>
+                    : 'Loading live rate…'}
+              </span>
+            </div>
+          </div>
+
+          <label className="flex items-center gap-2 text-sm text-foreground mt-1">
+            <input
+              type="checkbox"
+              checked={includeTelephony}
+              onChange={e => setIncludeTelephony(e.target.checked)}
+              className="w-4 h-4 accent-primary"
+            />
+            Include telephony (Twilio / Vobiz)
+          </label>
+          {includeTelephony && (
+            <CostingField label="Telephony" value={telephonyInrPerMin} onChange={setTelephonyInrPerMin} step={0.1} suffix="₹ / min" />
+          )}
+
+          <p className="text-[11px] text-muted-foreground mt-2 leading-relaxed">
+            Default Gemini Live rate ≈ $0.03 / min (native-audio model: $3/M input + $12/M output tokens at ~32 tok/sec each way).
+            Telephony optional; browser-voice has no per-minute charge.
+          </p>
+        </div>
+
+        <div className="card flex flex-col gap-4">
+          <h2 className="text-sm font-bold uppercase tracking-wide text-foreground">Estimate</h2>
+
+          <div className="bg-primary/10 border border-primary/20 rounded-xl p-5 flex flex-col items-center gap-1">
+            <span className="text-xs font-semibold text-muted-foreground uppercase tracking-wide">Monthly cost</span>
+            <span className="text-4xl font-bold text-primary flex items-center">
+              <IndianRupee className="w-7 h-7" />
+              {fmtInr(monthlyInr)}
+            </span>
+            <span className="text-xs text-muted-foreground">per month</span>
+          </div>
+
+          <div className="grid grid-cols-2 gap-3">
+            <div className="bg-muted/40 border border-border rounded-lg p-3">
+              <div className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground">Per day</div>
+              <div className="text-lg font-bold text-foreground">₹{fmtInr(dailyInr)}</div>
+            </div>
+            <div className="bg-muted/40 border border-border rounded-lg p-3">
+              <div className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground">Per minute</div>
+              <div className="text-lg font-bold text-foreground">₹{perMinInr.toFixed(2)}</div>
+            </div>
+            <div className="bg-muted/40 border border-border rounded-lg p-3">
+              <div className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground">Minutes / month</div>
+              <div className="text-lg font-bold text-foreground">{minutesPerMonth.toLocaleString('en-IN')}</div>
+            </div>
+            <div className="bg-muted/40 border border-border rounded-lg p-3">
+              <div className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground">Gemini rate</div>
+              <div className="text-lg font-bold text-foreground">₹{geminiInrPerMin.toFixed(2)} / min</div>
+            </div>
+          </div>
+
+          <div className="text-[11px] text-muted-foreground border-t border-border pt-3 leading-relaxed">
+            Formula: <code className="font-mono">hours/day × 60 × days/month × (gemini ₹/min{includeTelephony ? ' + telephony ₹/min' : ''})</code>.
+            Adjust rates above to match your actual contract.
+          </div>
+        </div>
+      </div>
+
+      {/* ── Pricing breakdown ────────────────────────────────────────── */}
+      <div className="card flex flex-col gap-4">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <h2 className="text-base font-bold text-foreground">Pricing Breakdown</h2>
+            <p className="text-sm text-muted-foreground mt-0.5">How the $0.03/min default is derived, and where the real cost can drift.</p>
+          </div>
+          <span className="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-bold border bg-emerald-500/10 text-emerald-700 dark:text-emerald-400 border-emerald-500/20">
+            ACTIVE MODEL
+          </span>
+        </div>
+
+        {/* Current model card */}
+        <div className="bg-emerald-500/5 border border-emerald-500/20 rounded-xl p-4">
+          <div className="flex items-center gap-2 mb-2">
+            <Cpu className="w-4 h-4 text-emerald-600 dark:text-emerald-400" />
+            <span className="text-xs uppercase tracking-wide font-semibold text-emerald-700 dark:text-emerald-400">Currently in use</span>
+          </div>
+          <code className="font-mono text-sm text-foreground font-bold block">gemini-3.1-flash-live-preview</code>
+          <p className="text-xs text-muted-foreground mt-1.5 leading-relaxed">
+            Native-audio preview model. Used by the browser (<code className="font-mono text-[11px]">/api/gemini/ws</code>) and Twilio bridge (<code className="font-mono text-[11px]">/api/twilio/stream</code>).
+            Vobiz outbound + voice-sample generation fall back to <code className="font-mono text-[11px]">gemini-2.0-flash-live-001</code>.
+            Override via <code className="font-mono text-[11px]">GEMINI_LIVE_MODEL</code> env var.
+          </p>
+        </div>
+
+        {/* Token rates table */}
+        <div>
+          <h3 className="text-xs font-bold uppercase tracking-wide text-muted-foreground mb-2">Official Google Pricing (per 1M tokens, USD)</h3>
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm border border-border rounded-lg overflow-hidden">
+              <thead className="bg-muted/50">
+                <tr className="text-left text-xs uppercase tracking-wide text-muted-foreground">
+                  <th className="px-3 py-2 font-semibold">Model</th>
+                  <th className="px-3 py-2 font-semibold text-right">Audio In</th>
+                  <th className="px-3 py-2 font-semibold text-right">Audio Out</th>
+                  <th className="px-3 py-2 font-semibold text-right">Text In</th>
+                  <th className="px-3 py-2 font-semibold text-right">Text Out</th>
+                </tr>
+              </thead>
+              <tbody className="font-mono text-xs">
+                <tr className="border-t border-border bg-emerald-500/5">
+                  <td className="px-3 py-2 font-bold">gemini-3.1-flash-live-preview <span className="text-[10px] font-sans uppercase tracking-wide text-emerald-600 ml-1">active</span></td>
+                  <td className="px-3 py-2 text-right">$3.00</td>
+                  <td className="px-3 py-2 text-right">$12.00</td>
+                  <td className="px-3 py-2 text-right">$0.50</td>
+                  <td className="px-3 py-2 text-right">$2.00</td>
+                </tr>
+                <tr className="border-t border-border">
+                  <td className="px-3 py-2">gemini-2.0-flash-live-001 <span className="text-[10px] font-sans uppercase tracking-wide text-muted-foreground ml-1">fallback</span></td>
+                  <td className="px-3 py-2 text-right">$0.35</td>
+                  <td className="px-3 py-2 text-right">$2.00</td>
+                  <td className="px-3 py-2 text-right">$0.35</td>
+                  <td className="px-3 py-2 text-right">$1.50</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+          <p className="text-[11px] text-muted-foreground mt-2">
+            Rates as published on ai.google.dev/pricing for preview Live models. Preview pricing can change without notice — verify before locking commercial pricing.
+          </p>
+        </div>
+
+        {/* Math */}
+        <div>
+          <h3 className="text-xs font-bold uppercase tracking-wide text-muted-foreground mb-2">How $0.03 / min is computed</h3>
+          <div className="bg-muted/30 border border-border rounded-lg p-4 text-xs font-mono leading-relaxed">
+            <div className="text-muted-foreground mb-2 font-sans italic">Assumes continuous audio in + out, ~32 audio tokens / second per direction:</div>
+            <div>input  = 60 s × 32 tok/s × $3 / 1,000,000 = <span className="text-foreground font-bold">$0.00576</span></div>
+            <div>output = 60 s × 32 tok/s × $12 / 1,000,000 = <span className="text-foreground font-bold">$0.02304</span></div>
+            <div className="border-t border-border mt-2 pt-2">
+              total  = $0.00576 + $0.02304 ≈ <span className="text-primary font-bold">$0.029 / min</span> ≈ ₹{(0.029 * usdToInr).toFixed(2)} / min (at ₹{usdToInr}/$)
+            </div>
+          </div>
+        </div>
+
+        {/* What's included / not included */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div className="bg-green-500/5 border border-green-500/20 rounded-lg p-3">
+            <h4 className="text-xs font-bold uppercase tracking-wide text-green-700 dark:text-green-400 mb-2">✓ Included in the estimate</h4>
+            <ul className="text-xs text-foreground space-y-1.5 leading-relaxed">
+              <li>• Real-time audio input (your speech → Gemini)</li>
+              <li>• Real-time audio output (Gemini → speaker)</li>
+              <li>• Optional telephony per-minute charge (Twilio / Vobiz)</li>
+            </ul>
+          </div>
+          <div className="bg-amber-500/5 border border-amber-500/20 rounded-lg p-3">
+            <h4 className="text-xs font-bold uppercase tracking-wide text-amber-700 dark:text-amber-400 mb-2">⚠ Not included (extras)</h4>
+            <ul className="text-xs text-foreground space-y-1.5 leading-relaxed">
+              <li>• System prompt re-billed as text on each turn</li>
+              <li>• Tool/function-call payloads (text in + text out)</li>
+              <li>• Voice-sample WAV generation (one-off, cached)</li>
+              <li>• Server hosting, bandwidth, database, storage</li>
+            </ul>
+          </div>
+        </div>
+
+        {/* Reality check */}
+        <div className="bg-blue-500/5 border border-blue-500/20 rounded-lg p-3">
+          <h4 className="text-xs font-bold uppercase tracking-wide text-blue-700 dark:text-blue-400 mb-2">Why your actual bill may differ</h4>
+          <ul className="text-xs text-foreground space-y-1.5 leading-relaxed">
+            <li><strong>Silence / turn-taking:</strong> real conversations bill ~40–60% of wall-clock audio in each direction, not 100% — actual cost is often <em>lower</em> than $0.03/min.</li>
+            <li><strong>Long system prompts:</strong> a 2,000-token prompt re-sent on each turn adds noticeable text-input cost over a long call.</li>
+            <li><strong>Tool calls:</strong> function definitions + arguments + responses are billed as text I/O.</li>
+            <li><strong>Preview repricing:</strong> the <code className="font-mono text-[11px]">3.1-flash-live-preview</code> rate is preview-tier; expect it to change at GA.</li>
+            <li><strong>Currency:</strong> Google bills in USD — your INR cost moves with FX. Default ₹{usdToInr}/$ here.</li>
+          </ul>
+        </div>
+
+        <p className="text-[11px] text-muted-foreground border-t border-border pt-3">
+          Source: <code className="font-mono">ai.google.dev/gemini-api/docs/pricing</code> · model in use is set in <code className="font-mono">backend/app/gemini/routes/call.py</code> and <code className="font-mono">twilio_bridge.py</code>.
+        </p>
+      </div>
+    </div>
+  )
+}
+
+type View = 'home' | 'calls' | 'voices' | 'techspecs' | 'agents' | 'tools' | 'costing'
 
 export default function GeminiPage() {
   const templates = useAgentTemplates(TEMPLATES)
@@ -1934,12 +2491,15 @@ export default function GeminiPage() {
   const [muted, setMuted] = useState(false)
   const [voice, setVoice] = useState('Aoede')
   const [toolIds, setToolIds] = useState<number[]>(templates[0]?.tool_ids || [])
+  const [ambientAlways, setAmbientAlways] = useState<string | null>(templates[0]?.ambient_always ?? null)
+  const [ambientToolCall, setAmbientToolCall] = useState<string | null>(templates[0]?.ambient_tool_call ?? null)
+  const [ambientVolume, setAmbientVolume] = useState<number>(templates[0]?.ambient_volume ?? 0.15)
   const transcriptEndRef = useRef<HTMLDivElement>(null)
 
   const { openConfigModal } = useUIStore()
 
   const { status, inCall, isConnected, transcript, errorCode, startCall, hangUp, clearTranscript, clearError } =
-    useGeminiVoice(systemPrompt, language, voice, toolIds)
+    useGeminiVoice(systemPrompt, language, voice, toolIds, ambientAlways, ambientToolCall, ambientVolume)
 
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -1953,6 +2513,9 @@ export default function GeminiPage() {
       if (t.voice) setVoice(t.voice)
       if (t.language) setLanguage(t.language)
       setToolIds(t.tool_ids || [])
+      setAmbientAlways(t.ambient_always ?? null)
+      setAmbientToolCall(t.ambient_tool_call ?? null)
+      setAmbientVolume(t.ambient_volume ?? 0.15)
     }
   }
 
@@ -2030,6 +2593,17 @@ export default function GeminiPage() {
             Tools
           </button>
           <button
+            onClick={() => { if (inCall) hangUp(); setView('costing') }}
+            className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+              view === 'costing'
+                ? 'bg-primary/10 text-primary border border-primary/20'
+                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+            }`}
+          >
+            <IndianRupee className="w-4 h-4" />
+            Costing
+          </button>
+          <button
             onClick={() => { if (inCall) hangUp(); setView('techspecs') }}
             className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-all ${
               view === 'techspecs'
@@ -2043,7 +2617,7 @@ export default function GeminiPage() {
         </aside>
 
         {/* ─── Main content ─── */}
-        {view === 'calls' ? <CallsView /> : view === 'voices' ? <VoicesView /> : view === 'techspecs' ? <TechSpecsView /> : view === 'agents' ? <AgentsView /> : view === 'tools' ? <ToolsView /> : (
+        {view === 'calls' ? <CallsView /> : view === 'voices' ? <VoicesView /> : view === 'techspecs' ? <TechSpecsView /> : view === 'agents' ? <AgentsView /> : view === 'tools' ? <ToolsView /> : view === 'costing' ? <CostingView /> : (
         <div className="flex-1 px-6 py-6 flex flex-col gap-4 min-w-0">
 
         {/* Page header + mode switcher */}

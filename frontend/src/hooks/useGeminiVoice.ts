@@ -39,7 +39,15 @@ function int16ToFloat32(buf: ArrayBuffer) {
   return f32
 }
 
-export default function useGeminiVoice(systemPrompt = '', language = 'en', voice = 'Aoede', toolIds: number[] = []) {
+export default function useGeminiVoice(
+  systemPrompt = '',
+  language = 'en',
+  voice = 'Aoede',
+  toolIds: number[] = [],
+  ambientAlways: string | null = null,
+  ambientToolCall: string | null = null,
+  ambientVolume = 0.15,
+) {
   const [status, setStatus] = useState<GeminiStatus>('idle')
   const [inCall, setInCall] = useState(false)
   const [isConnected, setIsConnected] = useState(false)
@@ -60,11 +68,17 @@ export default function useGeminiVoice(systemPrompt = '', language = 'en', voice
   const languageRef = useRef(language)
   const voiceRef = useRef(voice)
   const toolIdsRef = useRef(toolIds)
+  const ambientAlwaysRef = useRef(ambientAlways)
+  const ambientToolCallRef = useRef(ambientToolCall)
+  const ambientVolumeRef = useRef(ambientVolume)
 
   useEffect(() => { systemPromptRef.current = systemPrompt }, [systemPrompt])
   useEffect(() => { languageRef.current = language }, [language])
   useEffect(() => { voiceRef.current = voice }, [voice])
   useEffect(() => { toolIdsRef.current = toolIds }, [toolIds])
+  useEffect(() => { ambientAlwaysRef.current = ambientAlways }, [ambientAlways])
+  useEffect(() => { ambientToolCallRef.current = ambientToolCall }, [ambientToolCall])
+  useEffect(() => { ambientVolumeRef.current = ambientVolume }, [ambientVolume])
   useEffect(() => { inCallRef.current = inCall }, [inCall])
 
   function appendTranscript(role: 'user' | 'model', text: string) {
@@ -121,6 +135,9 @@ export default function useGeminiVoice(systemPrompt = '', language = 'en', voice
         language: languageRef.current,
         voice: voiceRef.current,
         tool_ids: toolIdsRef.current,
+        ambient_always: ambientAlwaysRef.current,
+        ambient_tool_call: ambientToolCallRef.current,
+        ambient_volume: ambientVolumeRef.current,
       }))
       onOpenCb()
     }

@@ -16,7 +16,7 @@ from .services.auth import hash_password
 from .seed_data import SEED_MODELS, compute_profile_for
 from .routes import auth, models_route, token_route, admin_route, config_routes, tts_route, fx_route, setup_route, internal_route
 from .ultravox.routes import ultravox, whatsapp
-from .gemini.routes import call as gemini_call, calls as gemini_calls, twilio_bridge, vobiz_bridge, voice_samples, agents as gemini_agents, tools as gemini_tools_route
+from .gemini.routes import call as gemini_call, calls as gemini_calls, twilio_bridge, vobiz_bridge, voice_samples, agents as gemini_agents, tools as gemini_tools_route, ambience as gemini_ambience
 from .services import model_setup, room_config_cache
 
 from .log_buffer import install as _install_log_buffer
@@ -52,6 +52,19 @@ async def _migrate_schema() -> None:
         await conn.execute(text(
             "ALTER TABLE gemini_agents ADD COLUMN IF NOT EXISTS "
             "tool_ids JSONB NOT NULL DEFAULT '[]'::jsonb"
+        ))
+        # gemini_agents.ambient_* — background ambience mixed into outgoing audio.
+        await conn.execute(text(
+            "ALTER TABLE gemini_agents ADD COLUMN IF NOT EXISTS "
+            "ambient_always VARCHAR(64)"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE gemini_agents ADD COLUMN IF NOT EXISTS "
+            "ambient_tool_call VARCHAR(64)"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE gemini_agents ADD COLUMN IF NOT EXISTS "
+            "ambient_volume DOUBLE PRECISION NOT NULL DEFAULT 0.15"
         ))
 
 
@@ -229,6 +242,7 @@ app.include_router(gemini_calls.router,   prefix="/api/gemini-calls", tags=["gem
 app.include_router(voice_samples.router,  prefix="/api/voice-samples", tags=["voice-samples"])
 app.include_router(gemini_agents.router,  prefix="/api/agents", tags=["agents"])
 app.include_router(gemini_tools_route.router, prefix="/api/tools", tags=["tools"])
+app.include_router(gemini_ambience.router, prefix="/api/ambience", tags=["ambience"])
 
 
 @app.get("/health")

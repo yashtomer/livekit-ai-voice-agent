@@ -23,6 +23,9 @@ from ...models.api_key import UserAPIKey
 from ...services.auth import decode_token
 from ...services.encryption import decrypt_key
 from ..services.logger import start_call, add_transcript, end_call
+from ..ambience import AmbientMixer
+
+OUTPUT_SAMPLE_RATE = 24000
 
 log = logging.getLogger("gemini_call")
 
@@ -146,6 +149,9 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
     language = "en"
     voice = "Aoede"
     tool_ids: list[int] = []
+    ambient_always: str | None = None
+    ambient_tool_call: str | None = None
+    ambient_volume = 0.15
     try:
         msg = await asyncio.wait_for(websocket.receive(), timeout=5.0)
         raw = msg.get("text") or ""
@@ -158,8 +164,37 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
                 raw_ids = cfg.get("tool_ids") or []
                 if isinstance(raw_ids, list):
                     tool_ids = [int(t) for t in raw_ids if isinstance(t, (int, str)) and str(t).isdigit()]
+                ambient_always = (cfg.get("ambient_always") or None) or None
+                ambient_tool_call = (cfg.get("ambient_tool_call") or None) or None
+                try:
+                    ambient_volume = float(cfg.get("ambient_volume", ambient_volume))
+                except (TypeError, ValueError):
+                    pass
     except (asyncio.TimeoutError, json.JSONDecodeError):
         pass
+
+    # Outgoing ambient mixers. Both can be active simultaneously: `always` plays
+    # at low volume continuously, `tool_call` adds typing/clicking only while a
+    # tool call is in flight (filler frames bridge the silent gap).
+    always_mixer = AmbientMixer(ambient_always, OUTPUT_SAMPLE_RATE, ambient_volume)
+    tool_mixer   = AmbientMixer(ambient_tool_call, OUTPUT_SAMPLE_RATE, ambient_volume)
+    # 40 ms ambient-filler frame at 24 kHz PCM16 mono.
+    _FILLER_BYTES = (OUTPUT_SAMPLE_RATE // 25) * 2
+    _FILLER_SILENCE = b"\x00" * _FILLER_BYTES
+
+    async def _ambient_filler():
+        """Stream ambient-only frames while Gemini is silent (tool-call gap)."""
+        try:
+            while True:
+                with_tool = tool_mixer.mix(_FILLER_SILENCE)
+                mixed = always_mixer.mix(with_tool)
+                try:
+                    await websocket.send_bytes(mixed)
+                except Exception:
+                    return
+                await asyncio.sleep(0.04)
+        except asyncio.CancelledError:
+            return
 
     # Resolve the agent's tools (if any)
     from ..services.tools_runtime import build_gemini_tools, dispatch_tool_call as _dispatch
@@ -220,73 +255,99 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
                                     return
 
                     async def gemini_to_frontend():
-                        while True:
-                            user_chunks: list[str] = []
-                            model_chunks: list[str] = []
-                            sent_speaking = False
-                            user_end_ts = None
-                            first_audio_ts = None
+                        nonlocal_filler: dict = {"task": None}
 
-                            async for response in session.receive():
-                                # Tool calls from Gemini
-                                tc = getattr(response, "tool_call", None)
-                                if tc and tc.function_calls:
-                                    tool_responses = []
-                                    for fc in tc.function_calls:
-                                        result = await _dispatch(tool_ids, fc.name, dict(fc.args or {}))
-                                        log.info("🔧 tool %s(%s) → %s", fc.name, dict(fc.args or {}), result)
-                                        tool_responses.append(
-                                            types.FunctionResponse(id=fc.id, name=fc.name, response=result)
-                                        )
-                                    await session.send_tool_response(function_responses=tool_responses)
-                                    continue
+                        async def stop_filler():
+                            t = nonlocal_filler["task"]
+                            if t is not None:
+                                t.cancel()
+                                try:
+                                    await t
+                                except asyncio.CancelledError:
+                                    pass
+                                nonlocal_filler["task"] = None
 
-                                if response.data:
-                                    if first_audio_ts is None:
-                                        first_audio_ts = time.monotonic()
-                                        if user_end_ts is not None:
-                                            log.info("⏱ user→first audio: %.0f ms", (first_audio_ts - user_end_ts) * 1000)
-                                    try:
-                                        await websocket.send_bytes(response.data)
-                                    except Exception:
-                                        return
-                                    if not sent_speaking:
-                                        await _send(websocket, {"type": "status", "state": "speaking"})
-                                        sent_speaking = True
+                        try:
+                            while True:
+                                user_chunks: list[str] = []
+                                model_chunks: list[str] = []
+                                sent_speaking = False
+                                user_end_ts = None
+                                first_audio_ts = None
 
-                                sc = response.server_content
-                                if sc is None:
-                                    continue
+                                async for response in session.receive():
+                                    # Tool calls from Gemini
+                                    tc = getattr(response, "tool_call", None)
+                                    if tc and tc.function_calls:
+                                        # Begin ambient filler so the user hears typing/clicks
+                                        # during the otherwise-silent dispatch gap.
+                                        if (
+                                            (always_mixer.enabled or tool_mixer.enabled)
+                                            and nonlocal_filler["task"] is None
+                                        ):
+                                            nonlocal_filler["task"] = asyncio.create_task(_ambient_filler())
+                                        tool_responses = []
+                                        for fc in tc.function_calls:
+                                            result = await _dispatch(tool_ids, fc.name, dict(fc.args or {}))
+                                            log.info("🔧 tool %s(%s) → %s", fc.name, dict(fc.args or {}), result)
+                                            tool_responses.append(
+                                                types.FunctionResponse(id=fc.id, name=fc.name, response=result)
+                                            )
+                                        await session.send_tool_response(function_responses=tool_responses)
+                                        continue
 
-                                if sc.interrupted:
-                                    await _send(websocket, {"type": "interrupted"})
-                                    await _send(websocket, {"type": "status", "state": "listening"})
-                                    model_chunks = []
-                                    sent_speaking = False
-                                    first_audio_ts = None
-                                    user_end_ts = None
+                                    if response.data:
+                                        # First real audio after a tool call: stop the filler
+                                        # (and let the always-mixer continue seamlessly).
+                                        await stop_filler()
+                                        if first_audio_ts is None:
+                                            first_audio_ts = time.monotonic()
+                                            if user_end_ts is not None:
+                                                log.info("⏱ user→first audio: %.0f ms", (first_audio_ts - user_end_ts) * 1000)
+                                        mixed = always_mixer.mix(response.data)
+                                        try:
+                                            await websocket.send_bytes(mixed)
+                                        except Exception:
+                                            return
+                                        if not sent_speaking:
+                                            await _send(websocket, {"type": "status", "state": "speaking"})
+                                            sent_speaking = True
 
-                                if sc.input_transcription and sc.input_transcription.text:
-                                    user_chunks.append(sc.input_transcription.text)
-                                    if user_end_ts is None:
-                                        user_end_ts = time.monotonic()
-                                if sc.output_transcription and sc.output_transcription.text:
-                                    model_chunks.append(sc.output_transcription.text)
+                                    sc = response.server_content
+                                    if sc is None:
+                                        continue
 
-                                if sc.turn_complete:
-                                    if user_chunks:
-                                        text = "".join(user_chunks).strip()
-                                        if text:
-                                            await _send(websocket, {"type": "transcript", "role": "user", "text": text})
-                                            await add_transcript(call_id, "user", text)
-                                    if model_chunks:
-                                        text = "".join(model_chunks).strip()
-                                        if text:
-                                            await _send(websocket, {"type": "transcript", "role": "model", "text": text})
-                                            await add_transcript(call_id, "model", text)
-                                    await _send(websocket, {"type": "status", "state": "listening"})
+                                    if sc.interrupted:
+                                        await _send(websocket, {"type": "interrupted"})
+                                        await _send(websocket, {"type": "status", "state": "listening"})
+                                        model_chunks = []
+                                        sent_speaking = False
+                                        first_audio_ts = None
+                                        user_end_ts = None
 
-                            await asyncio.sleep(0)
+                                    if sc.input_transcription and sc.input_transcription.text:
+                                        user_chunks.append(sc.input_transcription.text)
+                                        if user_end_ts is None:
+                                            user_end_ts = time.monotonic()
+                                    if sc.output_transcription and sc.output_transcription.text:
+                                        model_chunks.append(sc.output_transcription.text)
+
+                                    if sc.turn_complete:
+                                        if user_chunks:
+                                            text = "".join(user_chunks).strip()
+                                            if text:
+                                                await _send(websocket, {"type": "transcript", "role": "user", "text": text})
+                                                await add_transcript(call_id, "user", text)
+                                        if model_chunks:
+                                            text = "".join(model_chunks).strip()
+                                            if text:
+                                                await _send(websocket, {"type": "transcript", "role": "model", "text": text})
+                                                await add_transcript(call_id, "model", text)
+                                        await _send(websocket, {"type": "status", "state": "listening"})
+
+                                await asyncio.sleep(0)
+                        finally:
+                            await stop_filler()
 
                     done, pending = await asyncio.wait(
                         [

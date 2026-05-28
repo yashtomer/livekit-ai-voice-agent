@@ -38,6 +38,9 @@ from ..services.logger import start_call, add_transcript, end_call
 from ..services.agents_store import get_default_phone_agent
 from ..services.tools_runtime import build_gemini_tools, dispatch_tool_call
 from ..agents import DEFAULT_PHONE_AGENT
+from ..ambience import AmbientMixer
+
+OUTPUT_SAMPLE_RATE = 24000
 
 log = logging.getLogger("vobiz_bridge")
 
@@ -132,6 +135,9 @@ class OutboundCallRequest(BaseModel):
     language: str | None = None       # optional: override PHONE_LANGUAGE
     voice: str | None = None          # optional: override default voice
     tool_ids: list[int] | None = None  # optional: tools to expose to the agent
+    ambient_always: str | None = None        # optional: ambient slug played continuously
+    ambient_tool_call: str | None = None     # optional: ambient slug played during tool calls
+    ambient_volume: float | None = None      # optional: 0..1, default 0.15
 
 
 @router.post("/call")
@@ -153,12 +159,15 @@ async def make_outbound_call(
     _gc_call_configs()
     cfg_id = uuid.uuid4().hex[:12]
     CALL_CONFIGS[cfg_id] = {
-        "system_prompt": (req.system_prompt or "").strip() or PHONE_SYSTEM_PROMPT,
-        "language":      (req.language or "").strip() or PHONE_LANGUAGE,
-        "voice":         (req.voice or "").strip() or "Aoede",
-        "tool_ids":      list(req.tool_ids or []),
-        "to":            req.to,
-        "_ts":           datetime.utcnow().timestamp(),
+        "system_prompt":     (req.system_prompt or "").strip() or PHONE_SYSTEM_PROMPT,
+        "language":          (req.language or "").strip() or PHONE_LANGUAGE,
+        "voice":             (req.voice or "").strip() or "Aoede",
+        "tool_ids":          list(req.tool_ids or []),
+        "ambient_always":    (req.ambient_always or None) or None,
+        "ambient_tool_call": (req.ambient_tool_call or None) or None,
+        "ambient_volume":    req.ambient_volume if req.ambient_volume is not None else 0.15,
+        "to":                req.to,
+        "_ts":               datetime.utcnow().timestamp(),
     }
 
     url = f"https://api.vobiz.ai/api/v1/Account/{VOBIZ_AUTH_ID}/Call/"
@@ -269,6 +278,9 @@ async def vobiz_stream(ws: WebSocket):
         call_language = call_cfg["language"]
         call_voice    = call_cfg["voice"]
         call_tool_ids = list(call_cfg.get("tool_ids") or [])
+        _ambient_always_slug    = call_cfg.get("ambient_always") or None
+        _ambient_tool_call_slug = call_cfg.get("ambient_tool_call") or None
+        _ambient_vol            = float(call_cfg.get("ambient_volume") or 0.15)
         log.info("Vobiz stream using per-call cfg %s (lang=%s, voice=%s)",
                  cfg_id, call_language, call_voice)
     else:
@@ -277,7 +289,12 @@ async def vobiz_stream(ws: WebSocket):
         call_language = _agent.language      if _agent else PHONE_LANGUAGE
         call_voice    = _agent.voice         if _agent else "Aoede"
         call_tool_ids = list(_agent.tool_ids or []) if _agent else []
+        _ambient_always_slug    = getattr(_agent, "ambient_always", None) if _agent else None
+        _ambient_tool_call_slug = getattr(_agent, "ambient_tool_call", None) if _agent else None
+        _ambient_vol            = getattr(_agent, "ambient_volume", 0.15) if _agent else 0.15
     call_tools = await build_gemini_tools(call_tool_ids)
+    always_mixer = AmbientMixer(_ambient_always_slug,    OUTPUT_SAMPLE_RATE, _ambient_vol)
+    tool_mixer   = AmbientMixer(_ambient_tool_call_slug, OUTPUT_SAMPLE_RATE, _ambient_vol)
 
     stream_id: str | None = None
     call_id: str | None = None
@@ -371,55 +388,93 @@ async def vobiz_stream(ws: WebSocket):
                 from google.genai import types as gtypes
 
                 play_count = 0
-                while True:
-                    async for response in session.receive():
-                        # ─── Tool calls from Gemini ───
-                        tc = getattr(response, "tool_call", None)
-                        if tc and tc.function_calls:
-                            tool_responses = []
-                            for fc in tc.function_calls:
-                                result = await dispatch_tool_call(call_tool_ids, fc.name, dict(fc.args or {}))
-                                log.info("🔧 tool %s(%s) → %s", fc.name, dict(fc.args or {}), result)
-                                tool_responses.append(
-                                    gtypes.FunctionResponse(
-                                        id=fc.id,
-                                        name=fc.name,
-                                        response=result,
-                                    )
-                                )
-                            await session.send_tool_response(function_responses=tool_responses)
-                            continue
+                _FILLER_BYTES = (OUTPUT_SAMPLE_RATE // 25) * 2  # 40 ms @ 24 kHz PCM16
+                _FILLER_SILENCE = b"\x00" * _FILLER_BYTES
+                filler_box: dict = {"task": None}
 
-                        sc = response.server_content
-                        # Barge-in: caller interrupted → flush Vobiz playback queue
-                        if sc and sc.interrupted and stream_id:
-                            await ws.send_text(json.dumps({
-                                "event": "clearAudio",
-                                "streamId": stream_id,
-                            }))
-                        if response.data:
-                            mulaw, out_state = _pcm24k_to_mulaw8k(response.data, out_state)
-                            msg = {
-                                "event": "playAudio",
-                                "media": {
-                                    "contentType": "audio/x-mulaw",
-                                    "sampleRate": 8000,
-                                    "payload": base64.b64encode(mulaw).decode(),
-                                },
-                            }
-                            if stream_id:
-                                msg["streamId"] = stream_id
-                            await ws.send_text(json.dumps(msg))
-                            if play_count == 0:
-                                log.info("First playAudio sent (%d bytes mulaw)", len(mulaw))
-                            play_count += 1
-                        if sc and sc.input_transcription and sc.input_transcription.text:
-                            log.info("👤 %s", sc.input_transcription.text)
-                            await add_transcript(log_id, "user", sc.input_transcription.text)
-                        if sc and sc.output_transcription and sc.output_transcription.text:
-                            log.info("🤖 %s", sc.output_transcription.text)
-                            await add_transcript(log_id, "model", sc.output_transcription.text)
-                    await asyncio.sleep(0)
+                async def _send_mixed(pcm24k: bytes):
+                    nonlocal out_state, play_count
+                    mulaw, out_state = _pcm24k_to_mulaw8k(pcm24k, out_state)
+                    msg_out = {
+                        "event": "playAudio",
+                        "media": {
+                            "contentType": "audio/x-mulaw",
+                            "sampleRate": 8000,
+                            "payload": base64.b64encode(mulaw).decode(),
+                        },
+                    }
+                    if stream_id:
+                        msg_out["streamId"] = stream_id
+                    try:
+                        await ws.send_text(json.dumps(msg_out))
+                    except Exception:
+                        return
+                    if play_count == 0:
+                        log.info("First playAudio sent (%d bytes mulaw)", len(mulaw))
+                    play_count += 1
+
+                async def _filler_loop():
+                    try:
+                        while True:
+                            await _send_mixed(always_mixer.mix(tool_mixer.mix(_FILLER_SILENCE)))
+                            await asyncio.sleep(0.04)
+                    except asyncio.CancelledError:
+                        return
+
+                async def _stop_filler():
+                    t = filler_box["task"]
+                    if t is not None:
+                        t.cancel()
+                        try:
+                            await t
+                        except asyncio.CancelledError:
+                            pass
+                        filler_box["task"] = None
+
+                try:
+                    while True:
+                        async for response in session.receive():
+                            # ─── Tool calls from Gemini ───
+                            tc = getattr(response, "tool_call", None)
+                            if tc and tc.function_calls:
+                                if (
+                                    (always_mixer.enabled or tool_mixer.enabled)
+                                    and filler_box["task"] is None
+                                ):
+                                    filler_box["task"] = asyncio.create_task(_filler_loop())
+                                tool_responses = []
+                                for fc in tc.function_calls:
+                                    result = await dispatch_tool_call(call_tool_ids, fc.name, dict(fc.args or {}))
+                                    log.info("🔧 tool %s(%s) → %s", fc.name, dict(fc.args or {}), result)
+                                    tool_responses.append(
+                                        gtypes.FunctionResponse(
+                                            id=fc.id,
+                                            name=fc.name,
+                                            response=result,
+                                        )
+                                    )
+                                await session.send_tool_response(function_responses=tool_responses)
+                                continue
+
+                            sc = response.server_content
+                            # Barge-in: caller interrupted → flush Vobiz playback queue
+                            if sc and sc.interrupted and stream_id:
+                                await ws.send_text(json.dumps({
+                                    "event": "clearAudio",
+                                    "streamId": stream_id,
+                                }))
+                            if response.data:
+                                await _stop_filler()
+                                await _send_mixed(always_mixer.mix(response.data))
+                            if sc and sc.input_transcription and sc.input_transcription.text:
+                                log.info("👤 %s", sc.input_transcription.text)
+                                await add_transcript(log_id, "user", sc.input_transcription.text)
+                            if sc and sc.output_transcription and sc.output_transcription.text:
+                                log.info("🤖 %s", sc.output_transcription.text)
+                                await add_transcript(log_id, "model", sc.output_transcription.text)
+                        await asyncio.sleep(0)
+                finally:
+                    await _stop_filler()
 
             done, pending = await asyncio.wait(
                 [
