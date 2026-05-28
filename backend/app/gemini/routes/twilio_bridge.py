@@ -30,7 +30,6 @@ log = logging.getLogger("twilio_bridge")
 router = APIRouter()
 
 GOOGLE_API_KEY   = os.environ.get("GOOGLE_API_KEY", "")
-PUBLIC_HOST      = os.environ.get("PUBLIC_HOST", "").strip()
 PHONE_LANGUAGE   = os.environ.get("PHONE_LANGUAGE", "en")
 TWILIO_ACCOUNT_SID  = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
 TWILIO_API_KEY      = os.environ.get("TWILIO_API_KEY", "").strip()
@@ -87,7 +86,7 @@ def _make_live_config(system_prompt: str, language: str, voice: str = "Aoede", t
 @router.post("/voice")
 @router.get("/voice")
 async def voice_webhook(request: Request):
-    host = PUBLIC_HOST or request.url.hostname
+    host = request.url.hostname
     ws_url = f"wss://{host}/api/twilio/stream"
     log.info("/twilio/voice → stream %s", ws_url)
     twiml = f"""<?xml version="1.0" encoding="UTF-8"?>
@@ -103,7 +102,7 @@ async def voice_webhook(request: Request):
 
 @router.get("/config")
 async def twilio_config(request: Request):
-    host = PUBLIC_HOST or request.url.hostname
+    host = request.url.hostname
     return JSONResponse({
         "public_host": host,
         "voice_webhook_url":  f"https://{host}/api/twilio/voice",
@@ -113,7 +112,6 @@ async def twilio_config(request: Request):
         "phone_number":       TWILIO_PHONE_NUMBER or None,
         "missing_env": [
             n for n, v in [
-                ("PUBLIC_HOST", PUBLIC_HOST),
                 ("TWILIO_ACCOUNT_SID", TWILIO_ACCOUNT_SID),
                 ("TWILIO_API_KEY", TWILIO_API_KEY),
                 ("TWILIO_API_SECRET", TWILIO_API_SECRET),

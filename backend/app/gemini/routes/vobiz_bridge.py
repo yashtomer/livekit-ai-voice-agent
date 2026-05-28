@@ -47,7 +47,6 @@ log = logging.getLogger("vobiz_bridge")
 router = APIRouter()
 
 GOOGLE_API_KEY     = os.environ.get("GOOGLE_API_KEY", "")
-PUBLIC_HOST        = os.environ.get("PUBLIC_HOST", "").strip()
 PHONE_LANGUAGE     = os.environ.get("PHONE_LANGUAGE", "en")
 VOBIZ_AUTH_ID      = os.environ.get("VOBIZ_AUTH_ID", "").strip()
 VOBIZ_AUTH_TOKEN   = os.environ.get("VOBIZ_AUTH_TOKEN", "").strip()
@@ -143,6 +142,7 @@ class OutboundCallRequest(BaseModel):
 @router.post("/call")
 async def make_outbound_call(
     req: OutboundCallRequest,
+    request: Request,
     _user: User = Depends(get_current_user),
 ):
     """Trigger an outbound Vobiz call. When the recipient answers, Vobiz hits
@@ -151,7 +151,6 @@ async def make_outbound_call(
         ("VOBIZ_AUTH_ID", VOBIZ_AUTH_ID),
         ("VOBIZ_AUTH_TOKEN", VOBIZ_AUTH_TOKEN),
         ("VOBIZ_PHONE_NUMBER", VOBIZ_PHONE_NUMBER),
-        ("PUBLIC_HOST", PUBLIC_HOST),
     ] if not v]
     if missing:
         raise HTTPException(500, f"Missing env vars: {', '.join(missing)}")
@@ -170,9 +169,10 @@ async def make_outbound_call(
         "_ts":               datetime.utcnow().timestamp(),
     }
 
+    host = request.url.hostname
     url = f"https://api.vobiz.ai/api/v1/Account/{VOBIZ_AUTH_ID}/Call/"
-    answer_url = f"https://{PUBLIC_HOST}/api/vobiz/voice?cfg={cfg_id}"
-    hangup_url = f"https://{PUBLIC_HOST}/api/vobiz/status"
+    answer_url = f"https://{host}/api/vobiz/voice?cfg={cfg_id}"
+    hangup_url = f"https://{host}/api/vobiz/status"
 
     payload = {
         "from": VOBIZ_PHONE_NUMBER.lstrip("+"),
@@ -211,7 +211,7 @@ async def make_outbound_call(
 async def voice_webhook(request: Request):
     """Vobiz hits this when a call comes in. Returns XML telling Vobiz to
     open a bidirectional WebSocket to our /stream endpoint."""
-    host = PUBLIC_HOST or request.url.hostname
+    host = request.url.hostname
     cfg = request.query_params.get("cfg", "")
     ws_url = f"wss://{host}/api/vobiz/stream"
     if cfg:

@@ -150,7 +150,11 @@ services:
 
   # ─── Frontend (React/Vite → nginx) ───
   frontend:
-    build: ./frontend
+    build:
+      context: ./frontend
+      args:
+        # Baked into the Vite bundle at build time. Set in .env on the prod server.
+        VITE_BACKEND_URL: ${VITE_BACKEND_URL:-}
     ports: ["${HOST_BIND:-127.0.0.1}:${FRONTEND_PORT:-3000}:80"]
     depends_on:
       - backend
