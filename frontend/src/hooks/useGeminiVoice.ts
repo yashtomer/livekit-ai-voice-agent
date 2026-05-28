@@ -15,14 +15,22 @@ const WORKLET_URL = '/audio-capture-worklet.js'
 
 function getWsUrl(): string {
   const proto = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
-  const base = (import.meta.env.VITE_BACKEND_URL as string | undefined) || ''
   const token = localStorage.getItem('access_token') || ''
   const tokenParam = token ? `?token=${encodeURIComponent(token)}` : ''
-  if (base && !base.includes('host.docker.internal')) {
-    return base.replace(/^https?/, proto.slice(0, -1)) + '/api/gemini/ws' + tokenParam
+
+  // 1. Explicit WS URL override (production: VITE_BACKEND_WS_URL=wss://api-aivoice.aeologic.in)
+  const wsBase = (import.meta.env.VITE_BACKEND_WS_URL as string | undefined) || ''
+  if (wsBase && !wsBase.includes('host.docker.internal')) {
+    return wsBase.replace(/\/+$/, '') + '/api/gemini/ws' + tokenParam
   }
-  // Production (behind reverse proxy): same origin, no port.
-  // Local dev only: hit backend directly on :8000.
+
+  // 2. Generic backend URL override (covers both HTTP and WS; older config)
+  const base = (import.meta.env.VITE_BACKEND_URL as string | undefined) || ''
+  if (base && !base.includes('host.docker.internal')) {
+    return base.replace(/^https?/, proto.slice(0, -1)).replace(/\/+$/, '') + '/api/gemini/ws' + tokenParam
+  }
+
+  // 3. Default: same origin in production, explicit :8000 in local dev.
   const host = window.location.hostname
   const isLocal = host === 'localhost' || host === '127.0.0.1'
   const authority = isLocal ? `${host}:8000` : window.location.host

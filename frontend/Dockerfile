@@ -3,6 +3,10 @@ WORKDIR /app
 COPY package.json .
 RUN npm install
 COPY . .
+# Production WebSocket endpoint — baked into the bundle at build time.
+# Override per deploy via docker-compose build args or `--build-arg`.
+ARG VITE_BACKEND_WS_URL=""
+ENV VITE_BACKEND_WS_URL=$VITE_BACKEND_WS_URL
 RUN npm run build
 
 FROM nginx:alpine
