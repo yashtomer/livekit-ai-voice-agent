@@ -21,6 +21,9 @@ from ..services.logger import start_call, add_transcript, end_call
 from ..services.agents_store import get_default_phone_agent
 from ..services.tools_runtime import build_gemini_tools, dispatch_tool_call
 from ..agents import DEFAULT_PHONE_AGENT
+from ..ambience import AmbientMixer
+
+OUTPUT_SAMPLE_RATE = 24000
 
 log = logging.getLogger("twilio_bridge")
 
@@ -33,6 +36,7 @@ TWILIO_ACCOUNT_SID  = os.environ.get("TWILIO_ACCOUNT_SID", "").strip()
 TWILIO_API_KEY      = os.environ.get("TWILIO_API_KEY", "").strip()
 TWILIO_API_SECRET   = os.environ.get("TWILIO_API_SECRET", "").strip()
 TWILIO_TWIML_APP_SID = os.environ.get("TWILIO_TWIML_APP_SID", "").strip()
+TWILIO_PHONE_NUMBER  = os.environ.get("TWILIO_PHONE_NUMBER", "").strip()
 
 MODEL = "gemini-3.1-flash-live-preview"
 INPUT_SAMPLE_RATE = 16000
@@ -106,6 +110,7 @@ async def twilio_config(request: Request):
         "voice_webhook_method": "POST",
         "stream_ws_url":      f"wss://{host}/api/twilio/stream",
         "twiml_app_sid":      TWILIO_TWIML_APP_SID or None,
+        "phone_number":       TWILIO_PHONE_NUMBER or None,
         "missing_env": [
             n for n, v in [
                 ("PUBLIC_HOST", PUBLIC_HOST),
@@ -193,6 +198,13 @@ async def twilio_stream(ws: WebSocket):
                 call_voice    = _agent.voice         if _agent else "Aoede"
                 call_tool_ids = list(_agent.tool_ids or []) if _agent else []
                 call_tools    = await build_gemini_tools(call_tool_ids)
+                _ambient_always_slug    = getattr(_agent, "ambient_always", None) if _agent else None
+                _ambient_tool_call_slug = getattr(_agent, "ambient_tool_call", None) if _agent else None
+                _ambient_vol            = getattr(_agent, "ambient_volume", 0.15) if _agent else 0.15
+                # Mix into 24 kHz PCM (pre-resample); the existing 24→8 kHz
+                # μ-law stage downstream stays untouched.
+                always_mixer = AmbientMixer(_ambient_always_slug,    OUTPUT_SAMPLE_RATE, _ambient_vol)
+                tool_mixer   = AmbientMixer(_ambient_tool_call_slug, OUTPUT_SAMPLE_RATE, _ambient_vol)
                 call_id = await start_call(
                     call_type="twilio",
                     direction="inbound",
@@ -248,38 +260,80 @@ async def twilio_stream(ws: WebSocket):
 
                     async def gemini_to_twilio():
                         nonlocal out_state
-                        while True:
-                            async for response in session.receive():
-                                # Tool calls from Gemini
-                                tc = getattr(response, "tool_call", None)
-                                if tc and tc.function_calls:
-                                    tool_responses = []
-                                    for fc in tc.function_calls:
-                                        result = await dispatch_tool_call(call_tool_ids, fc.name, dict(fc.args or {}))
-                                        log.info("🔧 tool %s(%s) → %s", fc.name, dict(fc.args or {}), result)
-                                        tool_responses.append(
-                                            types.FunctionResponse(id=fc.id, name=fc.name, response=result)
-                                        )
-                                    await session.send_tool_response(function_responses=tool_responses)
-                                    continue
+                        _FILLER_BYTES = (OUTPUT_SAMPLE_RATE // 25) * 2  # 40 ms @ 24 kHz PCM16
+                        _FILLER_SILENCE = b"\x00" * _FILLER_BYTES
+                        filler_box: dict = {"task": None}
 
-                                sc = response.server_content
-                                if sc and sc.interrupted and stream_sid:
-                                    await ws.send_text(json.dumps({"event": "clear", "streamSid": stream_sid}))
-                                if response.data and stream_sid:
-                                    mulaw, out_state = _pcm24k_to_mulaw8k(response.data, out_state)
-                                    await ws.send_text(json.dumps({
-                                        "event": "media",
-                                        "streamSid": stream_sid,
-                                        "media": {"payload": base64.b64encode(mulaw).decode()},
-                                    }))
-                                if sc and sc.input_transcription and sc.input_transcription.text:
-                                    log.info("👤 %s", sc.input_transcription.text)
-                                    await add_transcript(call_id, "user", sc.input_transcription.text)
-                                if sc and sc.output_transcription and sc.output_transcription.text:
-                                    log.info("🤖 %s", sc.output_transcription.text)
-                                    await add_transcript(call_id, "model", sc.output_transcription.text)
-                            await asyncio.sleep(0)
+                        async def _send_mixed(pcm24k: bytes):
+                            nonlocal out_state
+                            if not stream_sid:
+                                return
+                            mulaw, out_state = _pcm24k_to_mulaw8k(pcm24k, out_state)
+                            try:
+                                await ws.send_text(json.dumps({
+                                    "event": "media",
+                                    "streamSid": stream_sid,
+                                    "media": {"payload": base64.b64encode(mulaw).decode()},
+                                }))
+                            except Exception:
+                                return
+
+                        async def _filler_loop():
+                            try:
+                                while True:
+                                    mixed = always_mixer.mix(tool_mixer.mix(_FILLER_SILENCE))
+                                    await _send_mixed(mixed)
+                                    await asyncio.sleep(0.04)
+                            except asyncio.CancelledError:
+                                return
+
+                        async def _stop_filler():
+                            t = filler_box["task"]
+                            if t is not None:
+                                t.cancel()
+                                try:
+                                    await t
+                                except asyncio.CancelledError:
+                                    pass
+                                filler_box["task"] = None
+
+                        try:
+                            while True:
+                                async for response in session.receive():
+                                    # Tool calls from Gemini
+                                    tc = getattr(response, "tool_call", None)
+                                    if tc and tc.function_calls:
+                                        if (
+                                            (always_mixer.enabled or tool_mixer.enabled)
+                                            and filler_box["task"] is None
+                                        ):
+                                            filler_box["task"] = asyncio.create_task(_filler_loop())
+                                        tool_responses = []
+                                        for fc in tc.function_calls:
+                                            result = await dispatch_tool_call(call_tool_ids, fc.name, dict(fc.args or {}))
+                                            log.info("🔧 tool %s(%s) → %s", fc.name, dict(fc.args or {}), result)
+                                            tool_responses.append(
+                                                types.FunctionResponse(id=fc.id, name=fc.name, response=result)
+                                            )
+                                        await session.send_tool_response(function_responses=tool_responses)
+                                        continue
+
+                                    sc = response.server_content
+                                    if sc and sc.interrupted and stream_sid:
+                                        await ws.send_text(json.dumps({"event": "clear", "streamSid": stream_sid}))
+                                    if response.data and stream_sid:
+                                        await _stop_filler()
+                                        mixed = always_mixer.mix(response.data)
+                                        await _send_mixed(mixed)
+                                    if sc and sc.input_transcription and sc.input_transcription.text:
+                                        log.info("👤 %s", sc.input_transcription.text)
+                                        await add_transcript(call_id, "user", sc.input_transcription.text)
+                                    if sc and sc.output_transcription and sc.output_transcription.text:
+                                        log.info("🤖 %s", sc.output_transcription.text)
+                                        await add_transcript(call_id, "model", sc.output_transcription.text)
+                                await asyncio.sleep(0)
+                        finally:
+                            await _stop_filler()
 
                     done, pending = await asyncio.wait(
                         [
