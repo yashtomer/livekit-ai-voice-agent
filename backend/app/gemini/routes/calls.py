@@ -6,7 +6,7 @@ Routes (mounted under /api/gemini-calls):
   GET /{id}      — single call with full transcript
 """
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...db import get_db
@@ -33,12 +33,22 @@ def _row_summary(row: GeminiCallLog) -> dict:
 
 
 @router.get("/")
-async def list_calls(limit: int = 100, db: AsyncSession = Depends(get_db)):
-    limit = max(1, min(limit, 500))
+async def list_calls(limit: int = 20, offset: int = 0, db: AsyncSession = Depends(get_db)):
+    limit = max(1, min(limit, 200))
+    offset = max(0, offset)
+    total = (await db.execute(select(func.count(GeminiCallLog.id)))).scalar_one()
     rows = (await db.execute(
-        select(GeminiCallLog).order_by(GeminiCallLog.started_at.desc()).limit(limit)
+        select(GeminiCallLog)
+        .order_by(GeminiCallLog.started_at.desc())
+        .limit(limit)
+        .offset(offset)
     )).scalars().all()
-    return {"items": [_row_summary(r) for r in rows]}
+    return {
+        "items": [_row_summary(r) for r in rows],
+        "total": total,
+        "limit": limit,
+        "offset": offset,
+    }
 
 
 @router.get("/{call_id}")

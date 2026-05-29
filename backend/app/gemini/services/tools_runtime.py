@@ -106,15 +106,55 @@ async def load_tools_by_ids(tool_ids: list[int]) -> list[GeminiTool]:
         return []
 
 
-async def build_gemini_tools(tool_ids: list[int]):
+KB_TOOL_NAME = "search_knowledge_base"
+
+
+def _build_kb_declaration():
+    """Synthetic FunctionDeclaration for the agent's KB-search tool.
+
+    The agent's linked KB collections are bound at call time inside
+    `dispatch_tool_call`; the LLM only sees a single `query` argument.
+    """
+    from google.genai import types
+    return types.FunctionDeclaration(
+        name=KB_TOOL_NAME,
+        description=(
+            "Search the agent's knowledge base for information that may help answer "
+            "the caller's question. Call this whenever the caller asks about company "
+            "policies, products, prices, hours, procedures, doctor lists, menus, or "
+            "any specific facts that you don't already know. Returns the top matching "
+            "text passages with their source documents."
+            "\n\nResponse keys:\n"
+            "  - hits (array of objects): each item has {content, filename, page_number, score}.\n"
+            "  - status (string): 'ok' or 'no_results'."
+        ),
+        parameters={
+            "type": "OBJECT",
+            "properties": {
+                "query": {
+                    "type": "STRING",
+                    "description": "A short phrase describing what you're looking up.",
+                },
+            },
+            "required": ["query"],
+        },
+    )
+
+
+async def build_gemini_tools(tool_ids: list[int], kb_collection_ids: list[int] | None = None):
     """Return a list of `types.Tool` ready to drop into LiveConnectConfig.tools.
-    Empty list if the agent has no tools assigned."""
+
+    Includes both DB-defined tools (HTTP/Python builtins) and — when the agent
+    has KB collections linked — the synthetic `search_knowledge_base` tool.
+    """
     from google.genai import types
 
     tools = await load_tools_by_ids(tool_ids)
-    if not tools:
-        return []
     decls = [_build_declaration(t) for t in tools]
+    if kb_collection_ids:
+        decls.append(_build_kb_declaration())
+    if not decls:
+        return []
     return [types.Tool(function_declarations=decls)]
 
 
@@ -146,14 +186,45 @@ async def _http_call(tool: GeminiTool, args: dict[str, Any]) -> dict[str, Any]:
         return {"status": "error", "message": str(e)}
 
 
-async def dispatch_tool_call(tool_ids: list[int], name: str, args: dict[str, Any]) -> dict[str, Any]:
+async def dispatch_tool_call(tool_ids: list[int], name: str, args: dict[str, Any],
+                              kb_collection_ids: list[int] | None = None) -> dict[str, Any]:
     """Resolve `name` against the agent's tool list and dispatch.
 
     Lookup order:
-      1. DB tool with matching slug (HTTP or Python builtin).
-      2. Direct Python builtin registry (legacy fallback for tools not yet in DB).
+      1. The synthetic `search_knowledge_base` (when the agent has KB collections).
+      2. DB tool with matching slug (HTTP or Python builtin).
+      3. Direct Python builtin registry (legacy fallback for tools not yet in DB).
     """
-    # 1. DB lookup
+    # 1. Built-in KB search
+    if name == KB_TOOL_NAME:
+        if not kb_collection_ids:
+            return {"status": "error", "message": "Agent has no knowledge-base configured"}
+        query = (args or {}).get("query") or ""
+        try:
+            from ..kb.search import search as kb_search
+            hits = await kb_search(collection_ids=kb_collection_ids, query=str(query), top_k=5)
+        except Exception as e:
+            log.exception("KB search failed")
+            return {"status": "error", "message": f"KB search error: {e}"}
+        if not hits:
+            return {"status": "no_results", "hits": []}
+        # Return full chunk text (cap generously — a chunk is ~600 words ≈ 4 KB).
+        # Truncating too aggressively drops the part of the chunk that actually
+        # answers the question.
+        return {
+            "status": "ok",
+            "hits": [
+                {
+                    "content":     h.get("content", "")[:6000],
+                    "filename":    h.get("filename"),
+                    "page_number": h.get("page_number"),
+                    "score":       round(float(h.get("score") or 0), 4),
+                }
+                for h in hits
+            ],
+        }
+
+    # 2. DB lookup
     tools = await load_tools_by_ids(tool_ids)
     match = next((t for t in tools if t.slug == name), None)
     if match:
@@ -168,7 +239,7 @@ async def dispatch_tool_call(tool_ids: list[int], name: str, args: dict[str, Any
             return {"status": "error", "message": f"Builtin tool {name} has no Python implementation"}
         return await _http_call(match, args or {})
 
-    # 2. Direct Python fallback (in case the agent has no tool_ids but tool was emitted)
+    # 3. Direct Python fallback (in case the agent has no tool_ids but tool was emitted)
     fn = PYTHON_TOOL_REGISTRY.get(name)
     if fn:
         try:

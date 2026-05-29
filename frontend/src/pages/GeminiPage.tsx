@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, type ComponentType, type Reac
 import { useQuery } from '@tanstack/react-query'
 import api from '../api/client'
 import { Device, Call } from '@twilio/voice-sdk'
-import { Phone, PhoneOff, Mic, MicOff, ChevronDown, Settings, Home, ListVideo, Eye, X, RefreshCw, Play, Loader2, Mic2, FileCode, ArrowRight, Globe, Cloud, Server, Cpu, PhoneCall, Wrench, Bot, Plus, Pencil, Trash2, Star, Lock, Webhook, FlaskConical, IndianRupee, Volume2, VolumeX, ArrowLeft, Music } from 'lucide-react'
+import { Phone, PhoneOff, Mic, MicOff, ChevronDown, Settings, Home, ListVideo, Eye, X, RefreshCw, Play, Loader2, Mic2, FileCode, ArrowRight, Globe, Cloud, Server, Cpu, PhoneCall, Wrench, Bot, Plus, Pencil, Trash2, Star, Lock, Webhook, FlaskConical, IndianRupee, Volume2, VolumeX, ArrowLeft, Music, BookOpen, FileText, Upload, Search, Database } from 'lucide-react'
 import Layout from '../components/Layout'
 import useGeminiVoice, { type GeminiStatus } from '../hooks/useGeminiVoice'
 import { useUIStore } from '../store/uiStore'
@@ -38,6 +38,7 @@ function formatDuration(s: number | null): string {
 
 type AgentTemplate = {
   label: string; prompt: string; voice?: string; language?: string; tool_ids?: number[]
+  kb_collection_ids?: number[]
   ambient_always?: string | null; ambient_tool_call?: string | null; ambient_volume?: number
 }
 
@@ -54,6 +55,7 @@ function useAgentTemplates(fallback: AgentTemplate[]): AgentTemplate[] {
         const mapped: AgentTemplate[] = (body.items || []).map((a: Agent) => ({
           label: a.name, prompt: a.system_prompt, voice: a.voice, language: a.language,
           tool_ids: a.tool_ids || [],
+          kb_collection_ids: a.kb_collection_ids || [],
           ambient_always: a.ambient_always, ambient_tool_call: a.ambient_tool_call,
           ambient_volume: a.ambient_volume,
         }))
@@ -477,6 +479,7 @@ function OutboundDialer() {
   const [language, setLanguage] = useState(templates[0]?.language || 'en')
   const [voice, setVoice] = useState(templates[0]?.voice || 'Aoede')
   const [toolIds, setToolIds] = useState<number[]>(templates[0]?.tool_ids || [])
+  const [kbCollectionIds, setKbCollectionIds] = useState<number[]>(templates[0]?.kb_collection_ids || [])
   const [ambientAlways, setAmbientAlways] = useState<string | null>(templates[0]?.ambient_always ?? null)
   const [ambientToolCall, setAmbientToolCall] = useState<string | null>(templates[0]?.ambient_tool_call ?? null)
   const [ambientVolume, setAmbientVolume] = useState<number>(templates[0]?.ambient_volume ?? 0.15)
@@ -498,6 +501,7 @@ function OutboundDialer() {
       if (t.voice) setVoice(t.voice)
       if (t.language) setLanguage(t.language)
       setToolIds(t.tool_ids || [])
+      setKbCollectionIds(t.kb_collection_ids || [])
       setAmbientAlways(t.ambient_always ?? null)
       setAmbientToolCall(t.ambient_tool_call ?? null)
       setAmbientVolume(t.ambient_volume ?? 0.15)
@@ -532,6 +536,7 @@ function OutboundDialer() {
         },
         body: JSON.stringify({
           to, system_prompt: systemPrompt, language, voice, tool_ids: toolIds,
+          kb_collection_ids: kbCollectionIds,
           ambient_always: ambientAlways, ambient_tool_call: ambientToolCall, ambient_volume: ambientVolume,
         }),
       })
@@ -685,21 +690,27 @@ type CallDetail = CallSummary & {
   error_message: string | null
 }
 
+const CALLS_PAGE_SIZE = 20
+
 function CallsView() {
   const [items, setItems] = useState<CallSummary[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [selected, setSelected] = useState<CallDetail | null>(null)
   const [detailLoading, setDetailLoading] = useState(false)
+  const [page, setPage] = useState(0)
+  const [total, setTotal] = useState(0)
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (pageArg: number) => {
     setLoading(true)
     setError('')
     try {
-      const res = await fetch(`${backendBase()}/api/gemini-calls/`)
+      const offset = pageArg * CALLS_PAGE_SIZE
+      const res = await fetch(`${backendBase()}/api/gemini-calls/?limit=${CALLS_PAGE_SIZE}&offset=${offset}`)
       if (!res.ok) throw new Error(`Failed: ${res.status}`)
       const body = await res.json()
       setItems(body.items || [])
+      setTotal(body.total ?? 0)
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -707,7 +718,11 @@ function CallsView() {
     }
   }, [])
 
-  useEffect(() => { load() }, [load])
+  useEffect(() => { load(page) }, [load, page])
+
+  const pageCount = Math.max(1, Math.ceil(total / CALLS_PAGE_SIZE))
+  const rangeStart = total === 0 ? 0 : page * CALLS_PAGE_SIZE + 1
+  const rangeEnd = Math.min(total, (page + 1) * CALLS_PAGE_SIZE)
 
   async function openCall(id: number) {
     setDetailLoading(true)
@@ -730,7 +745,7 @@ function CallsView() {
           <p className="text-sm text-muted-foreground">History of all Gemini Live calls with transcripts</p>
         </div>
         <button
-          onClick={load}
+          onClick={() => load(page)}
           className="flex items-center gap-2 px-3 py-1.5 text-sm rounded-lg border border-border bg-background hover:bg-muted transition-all"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
@@ -799,6 +814,34 @@ function CallsView() {
             ))}
           </tbody>
         </table>
+      </div>
+
+      {/* Pagination footer */}
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <span className="text-xs text-muted-foreground">
+          {total === 0 ? 'No calls' : `Showing ${rangeStart}–${rangeEnd} of ${total}`}
+        </span>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setPage(p => Math.max(0, p - 1))}
+            disabled={page === 0 || loading}
+            className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-lg border border-border bg-background hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            <ArrowLeft className="w-3.5 h-3.5" />
+            Prev
+          </button>
+          <span className="text-xs text-muted-foreground tabular-nums px-1">
+            Page {page + 1} / {pageCount}
+          </span>
+          <button
+            onClick={() => setPage(p => (p + 1 < pageCount ? p + 1 : p))}
+            disabled={page + 1 >= pageCount || loading}
+            className="inline-flex items-center gap-1 px-3 py-1.5 text-sm rounded-lg border border-border bg-background hover:bg-muted disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            Next
+            <ArrowRight className="w-3.5 h-3.5" />
+          </button>
+        </div>
       </div>
 
       {/* Transcript drawer */}
@@ -1601,6 +1644,7 @@ type Agent = {
   language: string
   voice: string
   tool_ids: number[]
+  kb_collection_ids: number[]
   ambient_always: string | null
   ambient_tool_call: string | null
   ambient_volume: number
@@ -1617,6 +1661,7 @@ type AgentDraft = {
   language: string
   voice: string
   tool_ids: number[]
+  kb_collection_ids: number[]
   ambient_always: string | null
   ambient_tool_call: string | null
   ambient_volume: number
@@ -1625,7 +1670,7 @@ type AgentDraft = {
 function emptyDraft(): AgentDraft {
   return {
     name: '', description: '', system_prompt: '',
-    language: 'en', voice: 'Aoede', tool_ids: [],
+    language: 'en', voice: 'Aoede', tool_ids: [], kb_collection_ids: [],
     ambient_always: null, ambient_tool_call: null, ambient_volume: 0.15,
   }
 }
@@ -1636,6 +1681,7 @@ function AgentsView() {
   const [items, setItems] = useState<Agent[]>([])
   const [allTools, setAllTools] = useState<Tool[]>([])
   const [ambience, setAmbience] = useState<Ambience[]>([])
+  const [kbCollections, setKbCollections] = useState<KbCollection[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [editing, setEditing] = useState<Agent | null>(null)
@@ -1647,14 +1693,16 @@ function AgentsView() {
     setLoading(true)
     setError('')
     try {
-      const [a, t, amb] = await Promise.all([
+      const [a, t, amb, kb] = await Promise.all([
         fetch(`${backendBase()}/api/agents/`).then(r => r.ok ? r.json() : Promise.reject(`agents ${r.status}`)),
         fetch(`${backendBase()}/api/tools/`).then(r => r.ok ? r.json() : Promise.reject(`tools ${r.status}`)),
         fetch(`${backendBase()}/api/ambience/`).then(r => r.ok ? r.json() : { items: [] }).catch(() => ({ items: [] })),
+        fetch(`${backendBase()}/api/kb/collections`).then(r => r.ok ? r.json() : { items: [] }).catch(() => ({ items: [] })),
       ])
       setItems(a.items || [])
       setAllTools(t.items || [])
       setAmbience(amb.items || [])
+      setKbCollections(kb.items || [])
     } catch (e) {
       setError(String(e))
     } finally {
@@ -1677,6 +1725,7 @@ function AgentsView() {
       language: a.language,
       voice: a.voice,
       tool_ids: [...(a.tool_ids || [])],
+      kb_collection_ids: [...(a.kb_collection_ids || [])],
       ambient_always: a.ambient_always,
       ambient_tool_call: a.ambient_tool_call,
       ambient_volume: a.ambient_volume ?? 0.15,
@@ -1688,6 +1737,13 @@ function AgentsView() {
     setDraft((d: AgentDraft) => ({
       ...d,
       tool_ids: d.tool_ids.includes(id) ? d.tool_ids.filter((x: number) => x !== id) : [...d.tool_ids, id],
+    }))
+  }
+
+  function toggleKb(id: number) {
+    setDraft((d: AgentDraft) => ({
+      ...d,
+      kb_collection_ids: d.kb_collection_ids.includes(id) ? d.kb_collection_ids.filter((x: number) => x !== id) : [...d.kb_collection_ids, id],
     }))
   }
 
@@ -1713,6 +1769,7 @@ function AgentsView() {
             language: draft.language,
             voice: draft.voice,
             tool_ids: draft.tool_ids,
+            kb_collection_ids: draft.kb_collection_ids,
             ambient_always: draft.ambient_always,
             ambient_tool_call: draft.ambient_tool_call,
             ambient_volume: draft.ambient_volume,
@@ -1775,7 +1832,9 @@ function AgentsView() {
         setDraft={setDraft}
         allTools={allTools}
         ambience={ambience}
+        kbCollections={kbCollections}
         toggleTool={toggleTool}
+        toggleKb={toggleKb}
         saving={saving}
         error={error}
         onCancel={closeEditor}
@@ -1890,7 +1949,9 @@ type AgentEditorProps = {
   setDraft: (d: AgentDraft | ((p: AgentDraft) => AgentDraft)) => void
   allTools: Tool[]
   ambience: Ambience[]
+  kbCollections: KbCollection[]
   toggleTool: (id: number) => void
+  toggleKb: (id: number) => void
   saving: boolean
   error: string
   onCancel: () => void
@@ -1991,7 +2052,7 @@ function AmbiencePicker({ label, hint, value, volume, options, onChange }: {
   )
 }
 
-function AgentEditor({ editing, draft, setDraft, allTools, ambience, toggleTool, saving, error, onCancel, onSave }: AgentEditorProps) {
+function AgentEditor({ editing, draft, setDraft, allTools, ambience, kbCollections, toggleTool, toggleKb, saving, error, onCancel, onSave }: AgentEditorProps) {
   const alwaysOptions   = ambience.filter(a => a.category === 'always' || a.category === 'both')
   const toolCallOptions = ambience.filter(a => a.category === 'tool_call' || a.category === 'both')
 
@@ -2137,6 +2198,45 @@ function AgentEditor({ editing, draft, setDraft, allTools, ambience, toggleTool,
                         {t.is_builtin && <span className="text-[9px] font-bold text-blue-600 dark:text-blue-400">BUILTIN</span>}
                       </div>
                       <p className="text-[11px] text-muted-foreground line-clamp-2 mt-0.5">{t.description}</p>
+                    </div>
+                  </label>
+                )
+              })}
+            </div>
+          )}
+        </section>
+
+        {/* ─── Knowledge bases ─── */}
+        <section className="card flex flex-col gap-3">
+          <div>
+            <h2 className="text-sm font-bold uppercase tracking-wide text-foreground flex items-center gap-2">
+              <BookOpen className="w-4 h-4" /> Knowledge Bases
+              <span className="text-[11px] font-normal text-muted-foreground normal-case ml-1">
+                ({draft.kb_collection_ids.length} selected — the agent can search these during calls)
+              </span>
+            </h2>
+            <p className="text-[11px] text-muted-foreground mt-0.5">
+              When at least one is selected, a <code className="font-mono">search_knowledge_base</code> tool is auto-enabled for this agent.
+            </p>
+          </div>
+          {kbCollections.length === 0 ? (
+            <p className="text-[11px] text-muted-foreground italic">No knowledge bases yet. Create one in the Knowledge Base tab.</p>
+          ) : (
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-2">
+              {kbCollections.map((c: KbCollection) => {
+                const checked = draft.kb_collection_ids.includes(c.id)
+                return (
+                  <label key={c.id}
+                    className={`flex items-start gap-2 px-2.5 py-2 rounded-md cursor-pointer transition-all border ${
+                      checked ? 'bg-primary/10 border-primary/30' : 'border-border hover:bg-muted/40'
+                    }`}>
+                    <input type="checkbox" checked={checked} onChange={() => toggleKb(c.id)} className="mt-0.5" />
+                    <div className="flex-1 min-w-0">
+                      <div className="flex items-center gap-1.5">
+                        <Database className="w-3 h-3 text-primary flex-shrink-0" />
+                        <span className="text-xs font-bold text-foreground truncate">{c.name}</span>
+                      </div>
+                      <p className="text-[11px] text-muted-foreground mt-0.5">{c.document_count} docs · {c.chunk_count} chunks</p>
                     </div>
                   </label>
                 )
@@ -2479,7 +2579,545 @@ function CostingView() {
   )
 }
 
-type View = 'home' | 'calls' | 'voices' | 'techspecs' | 'agents' | 'tools' | 'costing'
+// ── Knowledge Base ───────────────────────────────────────────────────────────
+
+type KbCollection = {
+  id: number
+  slug: string
+  name: string
+  description: string | null
+  embedding_model: string
+  chunk_size: number
+  chunk_overlap: number
+  document_count: number
+  chunk_count: number
+  created_at: string | null
+  updated_at: string | null
+}
+
+type KbDocument = {
+  id: number
+  collection_id: number
+  source: string
+  filename: string | null
+  mime_type: string | null
+  char_count: number
+  chunk_count: number
+  status: string
+  error: string | null
+  created_at: string | null
+  indexed_at: string | null
+}
+
+type KbSearchHit = {
+  chunk_id: number
+  document_id: number
+  page_number: number | null
+  content: string
+  filename: string | null
+  score: number
+}
+
+const KB_STATUS_BADGE: Record<string, string> = {
+  ready:      'bg-green-500/10 text-green-600 dark:text-green-400 border-green-500/20',
+  processing: 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400 border-yellow-500/20',
+  pending:    'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20',
+  failed:     'bg-destructive/10 text-destructive border-destructive/20',
+}
+
+function KnowledgeBaseView() {
+  const [collections, setCollections] = useState<KbCollection[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [selected, setSelected] = useState<KbCollection | null>(null)
+  const [creating, setCreating] = useState(false)
+  const [newName, setNewName] = useState('')
+  const [newDesc, setNewDesc] = useState('')
+  const [saving, setSaving] = useState(false)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const res = await fetch(`${backendBase()}/api/kb/collections`)
+      if (!res.ok) throw new Error(`Failed: ${res.status}`)
+      const body = await res.json()
+      setCollections(body.items || [])
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  async function createCollection() {
+    if (!newName.trim()) return
+    setSaving(true)
+    setError('')
+    try {
+      const res = await fetch(`${backendBase()}/api/kb/collections`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name: newName.trim(), description: newDesc.trim() || null }),
+      })
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}))
+        throw new Error(d.detail || `Failed: ${res.status}`)
+      }
+      setNewName(''); setNewDesc(''); setCreating(false)
+      await load()
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  async function removeCollection(c: KbCollection) {
+    if (!confirm(`Delete knowledge base "${c.name}" and all its documents? This cannot be undone.`)) return
+    setError('')
+    try {
+      const res = await fetch(`${backendBase()}/api/kb/collections/${c.id}`, { method: 'DELETE' })
+      if (!res.ok) throw new Error(`Failed: ${res.status}`)
+      await load()
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+
+  if (selected) {
+    return (
+      <KbCollectionDetail
+        collection={selected}
+        onBack={() => { setSelected(null); load() }}
+      />
+    )
+  }
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0 p-6 gap-4">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <h1 className="text-xl font-bold text-foreground">Knowledge Base</h1>
+          <p className="text-sm text-muted-foreground">
+            Upload PDFs, text, or markdown. Agents you link to a KB can search it during calls via <code className="font-mono text-xs">search_knowledge_base</code>.
+          </p>
+        </div>
+        <button
+          onClick={() => setCreating(true)}
+          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-all shadow-sm"
+        >
+          <Plus className="w-4 h-4" />
+          New Knowledge Base
+        </button>
+      </div>
+
+      {error && (
+        <div className="bg-destructive/10 border border-destructive/20 rounded-xl px-4 py-3 text-sm text-destructive">{error}</div>
+      )}
+
+      {creating && (
+        <div className="card flex flex-col gap-3">
+          <h3 className="text-sm font-bold uppercase tracking-wide text-foreground">New Knowledge Base</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <input
+              autoFocus
+              type="text"
+              value={newName}
+              onChange={e => setNewName(e.target.value)}
+              placeholder="e.g. Product Manual"
+              className="bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
+            />
+            <input
+              type="text"
+              value={newDesc}
+              onChange={e => setNewDesc(e.target.value)}
+              placeholder="Short description (optional)"
+              className="bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
+            />
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={createCollection}
+              disabled={saving || !newName.trim()}
+              className="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 inline-flex items-center gap-2"
+            >
+              {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+              Create
+            </button>
+            <button onClick={() => { setCreating(false); setNewName(''); setNewDesc('') }} className="px-4 py-2 rounded-lg border border-border hover:bg-muted text-sm font-medium">
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 overflow-auto pb-4">
+        {loading && collections.length === 0 ? (
+          <p className="col-span-full text-center text-muted-foreground py-10">Loading…</p>
+        ) : collections.length === 0 ? (
+          <p className="col-span-full text-center text-muted-foreground py-10">No knowledge bases yet. Create one to get started.</p>
+        ) : collections.map(c => (
+          <div key={c.id} className="card flex flex-col gap-3">
+            <div className="flex items-start justify-between gap-2">
+              <div className="flex items-center gap-2 min-w-0">
+                <Database className="w-5 h-5 text-primary flex-shrink-0" />
+                <h3 className="font-bold text-foreground truncate">{c.name}</h3>
+              </div>
+              <button
+                onClick={() => removeCollection(c)}
+                className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-destructive/30 text-destructive hover:bg-destructive/10 flex-shrink-0"
+                title="Delete"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+              </button>
+            </div>
+            {c.description && <p className="text-xs text-muted-foreground line-clamp-2">{c.description}</p>}
+            <div className="flex items-center gap-4 text-[11px] text-muted-foreground">
+              <span><span className="font-semibold text-foreground">{c.document_count}</span> docs</span>
+              <span><span className="font-semibold text-foreground">{c.chunk_count}</span> chunks</span>
+              <span className="font-mono opacity-50">#{c.slug}</span>
+            </div>
+            <button
+              onClick={() => setSelected(c)}
+              className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-border hover:bg-muted text-xs font-medium mt-1"
+            >
+              <FileText className="w-3.5 h-3.5" />
+              Manage documents
+            </button>
+          </div>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+function KbCollectionDetail({ collection, onBack }: { collection: KbCollection; onBack: () => void }) {
+  const [docs, setDocs] = useState<KbDocument[]>([])
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+  const [uploading, setUploading] = useState(false)
+  const [showText, setShowText] = useState(false)
+  const [textTitle, setTextTitle] = useState('')
+  const [textBody, setTextBody] = useState('')
+  const fileInputRef = useRef<HTMLInputElement>(null)
+
+  // Test-search state
+  const [query, setQuery] = useState('')
+  const [searching, setSearching] = useState(false)
+  const [hits, setHits] = useState<KbSearchHit[] | null>(null)
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    try {
+      const res = await fetch(`${backendBase()}/api/kb/collections/${collection.id}/documents`)
+      if (!res.ok) throw new Error(`Failed: ${res.status}`)
+      const body = await res.json()
+      setDocs(body.items || [])
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setLoading(false)
+    }
+  }, [collection.id])
+
+  useEffect(() => { load() }, [load])
+
+  // Poll while any doc is still processing.
+  useEffect(() => {
+    const anyPending = docs.some(d => d.status === 'pending' || d.status === 'processing')
+    if (!anyPending) return
+    const t = setInterval(load, 2500)
+    return () => clearInterval(t)
+  }, [docs, load])
+
+  async function uploadFiles(files: FileList | null) {
+    if (!files || files.length === 0) return
+    setUploading(true)
+    setError('')
+    try {
+      for (const file of Array.from(files)) {
+        const fd = new FormData()
+        fd.append('file', file)
+        const res = await fetch(`${backendBase()}/api/kb/collections/${collection.id}/documents`, {
+          method: 'POST',
+          body: fd,
+        })
+        if (!res.ok) {
+          const d = await res.json().catch(() => ({}))
+          throw new Error(d.detail || `Upload failed: ${res.status}`)
+        }
+      }
+      await load()
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setUploading(false)
+      if (fileInputRef.current) fileInputRef.current.value = ''
+    }
+  }
+
+  async function uploadText() {
+    if (!textTitle.trim() || !textBody.trim()) return
+    setUploading(true)
+    setError('')
+    try {
+      const fd = new FormData()
+      fd.append('title', textTitle.trim())
+      fd.append('content', textBody)
+      const res = await fetch(`${backendBase()}/api/kb/collections/${collection.id}/documents`, {
+        method: 'POST',
+        body: fd,
+      })
+      if (!res.ok) {
+        const d = await res.json().catch(() => ({}))
+        throw new Error(d.detail || `Failed: ${res.status}`)
+      }
+      setTextTitle(''); setTextBody(''); setShowText(false)
+      await load()
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setUploading(false)
+    }
+  }
+
+  async function removeDoc(d: KbDocument) {
+    if (!confirm(`Delete "${d.filename}"?`)) return
+    try {
+      const res = await fetch(`${backendBase()}/api/kb/collections/${collection.id}/documents/${d.id}`, { method: 'DELETE' })
+      if (!res.ok) throw new Error(`Failed: ${res.status}`)
+      await load()
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+
+  async function reindexDoc(d: KbDocument) {
+    try {
+      const res = await fetch(`${backendBase()}/api/kb/collections/${collection.id}/documents/${d.id}/reindex`, { method: 'POST' })
+      if (!res.ok) throw new Error(`Failed: ${res.status}`)
+      await load()
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+
+  async function runSearch() {
+    if (!query.trim()) return
+    setSearching(true)
+    setHits(null)
+    setError('')
+    try {
+      const res = await fetch(`${backendBase()}/api/kb/collections/${collection.id}/search`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ query: query.trim(), top_k: 5 }),
+      })
+      if (!res.ok) throw new Error(`Failed: ${res.status}`)
+      const body = await res.json()
+      setHits(body.items || [])
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setSearching(false)
+    }
+  }
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0 overflow-y-auto">
+      {/* Sticky header */}
+      <div className="sticky top-0 z-10 bg-card/80 backdrop-blur border-b border-border px-6 py-3 flex items-center gap-3">
+        <button onClick={onBack} className="w-9 h-9 rounded-lg border border-border hover:bg-muted flex items-center justify-center flex-shrink-0" title="Back to knowledge bases">
+          <ArrowLeft className="w-4 h-4" />
+        </button>
+        <div className="min-w-0">
+          <h1 className="text-lg font-bold text-foreground truncate flex items-center gap-2">
+            <Database className="w-4 h-4 text-primary" /> {collection.name}
+          </h1>
+          <p className="text-xs text-muted-foreground">
+            {docs.length} documents · {docs.reduce((n, d) => n + (d.chunk_count || 0), 0)} chunks · chunk size {collection.chunk_size}/{collection.chunk_overlap}
+          </p>
+        </div>
+      </div>
+
+      <div className="px-6 py-5 max-w-5xl w-full mx-auto flex flex-col gap-5">
+        {error && (
+          <div className="bg-destructive/10 border border-destructive/20 rounded-xl px-4 py-3 text-sm text-destructive">{error}</div>
+        )}
+
+        {/* Upload zone */}
+        <section className="card flex flex-col gap-3">
+          <h2 className="text-sm font-bold uppercase tracking-wide text-foreground">Add documents</h2>
+          <div className="flex flex-wrap items-center gap-3">
+            <input
+              ref={fileInputRef}
+              type="file"
+              accept=".pdf,.txt,.md,.markdown,application/pdf,text/plain,text/markdown"
+              multiple
+              onChange={e => uploadFiles(e.target.files)}
+              className="hidden"
+            />
+            <button
+              onClick={() => fileInputRef.current?.click()}
+              disabled={uploading}
+              className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 disabled:opacity-50"
+            >
+              {uploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+              Upload PDF / TXT / MD
+            </button>
+            <button
+              onClick={() => setShowText(v => !v)}
+              className="flex items-center gap-2 px-4 py-2 rounded-lg border border-border hover:bg-muted text-sm font-medium"
+            >
+              <FileText className="w-4 h-4" />
+              Paste text
+            </button>
+            <span className="text-[11px] text-muted-foreground">PDFs must contain selectable text (scanned images aren't OCR'd).</span>
+          </div>
+
+          {showText && (
+            <div className="flex flex-col gap-2 pt-2 border-t border-border">
+              <input
+                type="text"
+                value={textTitle}
+                onChange={e => setTextTitle(e.target.value)}
+                placeholder="Title (e.g. Refund Policy)"
+                className="bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
+              />
+              <textarea
+                value={textBody}
+                onChange={e => setTextBody(e.target.value)}
+                rows={8}
+                placeholder="Paste the knowledge text here…"
+                className="bg-muted/30 border border-border rounded-lg px-3 py-2 text-xs leading-relaxed focus:outline-none focus:border-primary resize-y"
+              />
+              <div className="flex items-center gap-2">
+                <button
+                  onClick={uploadText}
+                  disabled={uploading || !textTitle.trim() || !textBody.trim()}
+                  className="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 inline-flex items-center gap-2"
+                >
+                  {uploading && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                  Add text
+                </button>
+                <button onClick={() => { setShowText(false); setTextTitle(''); setTextBody('') }} className="px-4 py-2 rounded-lg border border-border hover:bg-muted text-sm font-medium">
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
+
+        {/* Documents list */}
+        <section className="card p-0 overflow-hidden">
+          <div className="px-4 py-3 border-b border-border flex items-center justify-between">
+            <h2 className="text-sm font-bold uppercase tracking-wide text-foreground">Documents</h2>
+            <button onClick={load} className="inline-flex items-center gap-1.5 px-2.5 py-1 text-xs rounded-lg border border-border hover:bg-muted">
+              <RefreshCw className={`w-3 h-3 ${loading ? 'animate-spin' : ''}`} /> Refresh
+            </button>
+          </div>
+          <div className="overflow-auto">
+            <table className="w-full text-sm">
+              <thead className="bg-muted/40 text-muted-foreground text-xs uppercase tracking-wide">
+                <tr className="text-left">
+                  <th className="px-4 py-2 font-semibold">Name</th>
+                  <th className="px-4 py-2 font-semibold">Type</th>
+                  <th className="px-4 py-2 font-semibold text-center">Chunks</th>
+                  <th className="px-4 py-2 font-semibold">Status</th>
+                  <th className="px-4 py-2 font-semibold text-right">Actions</th>
+                </tr>
+              </thead>
+              <tbody>
+                {docs.length === 0 ? (
+                  <tr><td colSpan={5} className="px-4 py-8 text-center text-muted-foreground">No documents yet.</td></tr>
+                ) : docs.map(d => (
+                  <tr key={d.id} className="border-t border-border/50 hover:bg-muted/20">
+                    <td className="px-4 py-2.5">
+                      <div className="flex items-center gap-2 min-w-0">
+                        {d.source === 'text' ? <FileText className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" /> : <FileCode className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />}
+                        <span className="truncate max-w-[260px]" title={d.filename || ''}>{d.filename || '—'}</span>
+                      </div>
+                      {d.status === 'failed' && d.error && (
+                        <p className="text-[11px] text-destructive mt-0.5 line-clamp-2">{d.error}</p>
+                      )}
+                    </td>
+                    <td className="px-4 py-2.5 text-muted-foreground text-xs uppercase">{d.source}</td>
+                    <td className="px-4 py-2.5 text-center">{d.chunk_count}</td>
+                    <td className="px-4 py-2.5">
+                      <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-xs font-medium border ${KB_STATUS_BADGE[d.status] || 'bg-muted text-foreground border-border'}`}>
+                        {(d.status === 'pending' || d.status === 'processing') && <Loader2 className="w-3 h-3 animate-spin" />}
+                        {d.status}
+                      </span>
+                    </td>
+                    <td className="px-4 py-2.5 text-right">
+                      <div className="inline-flex items-center gap-1">
+                        {d.status === 'failed' && (
+                          <button onClick={() => reindexDoc(d)} className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-border hover:bg-muted" title="Re-index">
+                            <RefreshCw className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                        <button onClick={() => removeDoc(d)} className="inline-flex items-center justify-center w-7 h-7 rounded-md border border-destructive/30 text-destructive hover:bg-destructive/10" title="Delete">
+                          <Trash2 className="w-3.5 h-3.5" />
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+
+        {/* Test search */}
+        <section className="card flex flex-col gap-3">
+          <h2 className="text-sm font-bold uppercase tracking-wide text-foreground flex items-center gap-2">
+            <Search className="w-4 h-4" /> Test search
+          </h2>
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') runSearch() }}
+              placeholder="Ask something the way a caller would…"
+              className="flex-1 bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
+            />
+            <button
+              onClick={runSearch}
+              disabled={searching || !query.trim()}
+              className="px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 disabled:opacity-50 inline-flex items-center gap-2"
+            >
+              {searching ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
+              Search
+            </button>
+          </div>
+          {hits != null && (
+            hits.length === 0 ? (
+              <p className="text-sm text-muted-foreground text-center py-4">No matches found.</p>
+            ) : (
+              <div className="flex flex-col gap-2">
+                {hits.map(h => (
+                  <div key={h.chunk_id} className="bg-muted/30 border border-border rounded-lg p-3">
+                    <div className="flex items-center justify-between text-[11px] text-muted-foreground mb-1">
+                      <span className="font-mono">{h.filename || '—'}{h.page_number ? ` · p.${h.page_number}` : ''}</span>
+                      <span className="font-mono">score {h.score.toFixed(3)}</span>
+                    </div>
+                    <p className="text-xs text-foreground/90 leading-relaxed line-clamp-4">{h.content}</p>
+                  </div>
+                ))}
+              </div>
+            )
+          )}
+        </section>
+      </div>
+    </div>
+  )
+}
+
+type View = 'home' | 'calls' | 'voices' | 'techspecs' | 'agents' | 'tools' | 'costing' | 'kb'
 
 export default function GeminiPage() {
   const templates = useAgentTemplates(TEMPLATES)
@@ -2491,6 +3129,7 @@ export default function GeminiPage() {
   const [muted, setMuted] = useState(false)
   const [voice, setVoice] = useState('Aoede')
   const [toolIds, setToolIds] = useState<number[]>(templates[0]?.tool_ids || [])
+  const [kbCollectionIds, setKbCollectionIds] = useState<number[]>(templates[0]?.kb_collection_ids || [])
   const [ambientAlways, setAmbientAlways] = useState<string | null>(templates[0]?.ambient_always ?? null)
   const [ambientToolCall, setAmbientToolCall] = useState<string | null>(templates[0]?.ambient_tool_call ?? null)
   const [ambientVolume, setAmbientVolume] = useState<number>(templates[0]?.ambient_volume ?? 0.15)
@@ -2499,7 +3138,7 @@ export default function GeminiPage() {
   const { openConfigModal } = useUIStore()
 
   const { status, inCall, isConnected, transcript, errorCode, startCall, hangUp, clearTranscript, clearError } =
-    useGeminiVoice(systemPrompt, language, voice, toolIds, ambientAlways, ambientToolCall, ambientVolume)
+    useGeminiVoice(systemPrompt, language, voice, toolIds, ambientAlways, ambientToolCall, ambientVolume, kbCollectionIds)
 
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -2513,6 +3152,7 @@ export default function GeminiPage() {
       if (t.voice) setVoice(t.voice)
       if (t.language) setLanguage(t.language)
       setToolIds(t.tool_ids || [])
+      setKbCollectionIds(t.kb_collection_ids || [])
       setAmbientAlways(t.ambient_always ?? null)
       setAmbientToolCall(t.ambient_tool_call ?? null)
       setAmbientVolume(t.ambient_volume ?? 0.15)
@@ -2593,6 +3233,17 @@ export default function GeminiPage() {
             Tools
           </button>
           <button
+            onClick={() => { if (inCall) hangUp(); setView('kb') }}
+            className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+              view === 'kb'
+                ? 'bg-primary/10 text-primary border border-primary/20'
+                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+            }`}
+          >
+            <BookOpen className="w-4 h-4" />
+            Knowledge Base
+          </button>
+          <button
             onClick={() => { if (inCall) hangUp(); setView('costing') }}
             className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-all ${
               view === 'costing'
@@ -2617,7 +3268,7 @@ export default function GeminiPage() {
         </aside>
 
         {/* ─── Main content ─── */}
-        {view === 'calls' ? <CallsView /> : view === 'voices' ? <VoicesView /> : view === 'techspecs' ? <TechSpecsView /> : view === 'agents' ? <AgentsView /> : view === 'tools' ? <ToolsView /> : view === 'costing' ? <CostingView /> : (
+        {view === 'calls' ? <CallsView /> : view === 'voices' ? <VoicesView /> : view === 'techspecs' ? <TechSpecsView /> : view === 'agents' ? <AgentsView /> : view === 'tools' ? <ToolsView /> : view === 'costing' ? <CostingView /> : view === 'kb' ? <KnowledgeBaseView /> : (
         <div className="flex-1 px-6 py-6 flex flex-col gap-4 min-w-0">
 
         {/* Page header + mode switcher */}

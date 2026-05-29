@@ -16,6 +16,8 @@ class GeminiAgent(Base):
     language: Mapped[str] = mapped_column(String(16), nullable=False, default="en")
     voice: Mapped[str] = mapped_column(String(64), nullable=False, default="Aoede")
     tool_ids: Mapped[Any] = mapped_column(JSON, nullable=False, default=list)  # list[int]
+    # Knowledge-base collections the agent can search via the search_knowledge_base tool.
+    kb_collection_ids: Mapped[Any] = mapped_column(JSON, nullable=False, default=list)  # list[int]
     # Ambient sound mixed into the agent's outgoing audio.
     # `ambient_always`     — plays softly under every reply (null = off).
     # `ambient_tool_call`  — plays only during tool-call dispatch (null = off).
