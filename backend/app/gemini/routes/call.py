@@ -149,6 +149,7 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
     language = "en"
     voice = "Aoede"
     tool_ids: list[int] = []
+    kb_collection_ids: list[int] = []
     ambient_always: str | None = None
     ambient_tool_call: str | None = None
     ambient_volume = 0.15
@@ -164,6 +165,9 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
                 raw_ids = cfg.get("tool_ids") or []
                 if isinstance(raw_ids, list):
                     tool_ids = [int(t) for t in raw_ids if isinstance(t, (int, str)) and str(t).isdigit()]
+                raw_kb = cfg.get("kb_collection_ids") or []
+                if isinstance(raw_kb, list):
+                    kb_collection_ids = [int(t) for t in raw_kb if isinstance(t, (int, str)) and str(t).isdigit()]
                 ambient_always = (cfg.get("ambient_always") or None) or None
                 ambient_tool_call = (cfg.get("ambient_tool_call") or None) or None
                 try:
@@ -198,7 +202,7 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
 
     # Resolve the agent's tools (if any)
     from ..services.tools_runtime import build_gemini_tools, dispatch_tool_call as _dispatch
-    gemini_tools = await build_gemini_tools(tool_ids)
+    gemini_tools = await build_gemini_tools(tool_ids, kb_collection_ids)
 
     call_id = await start_call(
         call_type="browser",
@@ -288,7 +292,7 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
                                             nonlocal_filler["task"] = asyncio.create_task(_ambient_filler())
                                         tool_responses = []
                                         for fc in tc.function_calls:
-                                            result = await _dispatch(tool_ids, fc.name, dict(fc.args or {}))
+                                            result = await _dispatch(tool_ids, fc.name, dict(fc.args or {}), kb_collection_ids=kb_collection_ids)
                                             log.info("🔧 tool %s(%s) → %s", fc.name, dict(fc.args or {}), result)
                                             tool_responses.append(
                                                 types.FunctionResponse(id=fc.id, name=fc.name, response=result)

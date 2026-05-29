@@ -12,11 +12,12 @@ from .models import User, UserRole, UserAPIKey, ModelEntry, CallSession, AdminSe
 from .gemini.models.call_log import GeminiCallLog  # noqa: F401 — register table for create_all
 from .gemini.models.agent import GeminiAgent  # noqa: F401 — register table for create_all
 from .gemini.models.tool import GeminiTool  # noqa: F401 — register table for create_all
+from .gemini.models.kb import GeminiKbCollection, GeminiKbDocument, GeminiKbChunk  # noqa: F401
 from .services.auth import hash_password
 from .seed_data import SEED_MODELS, compute_profile_for
 from .routes import auth, models_route, token_route, admin_route, config_routes, tts_route, fx_route, setup_route, internal_route
 from .ultravox.routes import ultravox, whatsapp
-from .gemini.routes import call as gemini_call, calls as gemini_calls, twilio_bridge, vobiz_bridge, voice_samples, agents as gemini_agents, tools as gemini_tools_route, ambience as gemini_ambience
+from .gemini.routes import call as gemini_call, calls as gemini_calls, twilio_bridge, vobiz_bridge, voice_samples, agents as gemini_agents, tools as gemini_tools_route, ambience as gemini_ambience, kb as gemini_kb_route
 from .services import model_setup, room_config_cache
 
 from .log_buffer import install as _install_log_buffer
@@ -65,6 +66,32 @@ async def _migrate_schema() -> None:
         await conn.execute(text(
             "ALTER TABLE gemini_agents ADD COLUMN IF NOT EXISTS "
             "ambient_volume DOUBLE PRECISION NOT NULL DEFAULT 0.15"
+        ))
+        # Vector similarity index on the KB chunks table — only if the
+        # extension and table both exist (pgvector_enabled may be False).
+        if "gemini_kb_chunks" in Base.metadata.tables:
+            await conn.execute(text(
+                "CREATE INDEX IF NOT EXISTS gemini_kb_chunks_collection_idx "
+                "ON gemini_kb_chunks (collection_id)"
+            ))
+            try:
+                await conn.execute(text(
+                    "CREATE INDEX IF NOT EXISTS gemini_kb_chunks_embedding_hnsw "
+                    "ON gemini_kb_chunks USING hnsw (embedding vector_cosine_ops)"
+                ))
+            except Exception:
+                try:
+                    await conn.execute(text(
+                        "CREATE INDEX IF NOT EXISTS gemini_kb_chunks_embedding_ivf "
+                        "ON gemini_kb_chunks USING ivfflat (embedding vector_cosine_ops) "
+                        "WITH (lists = 100)"
+                    ))
+                except Exception as ie:
+                    logger.warning("Could not create vector index: %s — searches will be slow.", ie)
+        # Agents pick which KB collections they can query.
+        await conn.execute(text(
+            "ALTER TABLE gemini_agents ADD COLUMN IF NOT EXISTS "
+            "kb_collection_ids JSONB NOT NULL DEFAULT '[]'::jsonb"
         ))
 
 
@@ -187,8 +214,32 @@ async def _seed_database() -> None:
         logger.info("Database seeding complete")
 
 
+async def _ensure_pgvector() -> bool:
+    """Try to install the pgvector extension. If unavailable, drop KB tables
+    from the metadata so the rest of the app can still boot."""
+    async with engine.begin() as conn:
+        try:
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+            return True
+        except Exception as e:
+            logger.warning(
+                "pgvector extension not available (%s). "
+                "Knowledge-base features will be DISABLED. To enable, install pgvector "
+                "on the Postgres host: `apt install postgresql-16-pgvector` (match your PG version), "
+                "then restart the backend.", e,
+            )
+    # Strip KB tables from create_all so VECTOR(768) is never emitted.
+    for tbl_name in ("gemini_kb_chunks", "gemini_kb_documents", "gemini_kb_collections"):
+        tbl = Base.metadata.tables.get(tbl_name)
+        if tbl is not None:
+            Base.metadata.remove(tbl)
+    return False
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    pgvector_ok = await _ensure_pgvector()
+    app.state.pgvector_enabled = pgvector_ok
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     await _migrate_schema()
@@ -243,6 +294,7 @@ app.include_router(voice_samples.router,  prefix="/api/voice-samples", tags=["vo
 app.include_router(gemini_agents.router,  prefix="/api/agents", tags=["agents"])
 app.include_router(gemini_tools_route.router, prefix="/api/tools", tags=["tools"])
 app.include_router(gemini_ambience.router, prefix="/api/ambience", tags=["ambience"])
+app.include_router(gemini_kb_route.router, prefix="/api/kb", tags=["kb"])
 
 
 @app.get("/health")

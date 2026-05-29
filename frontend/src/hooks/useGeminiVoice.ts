@@ -47,6 +47,7 @@ export default function useGeminiVoice(
   ambientAlways: string | null = null,
   ambientToolCall: string | null = null,
   ambientVolume = 0.15,
+  kbCollectionIds: number[] = [],
 ) {
   const [status, setStatus] = useState<GeminiStatus>('idle')
   const [inCall, setInCall] = useState(false)
@@ -71,6 +72,7 @@ export default function useGeminiVoice(
   const ambientAlwaysRef = useRef(ambientAlways)
   const ambientToolCallRef = useRef(ambientToolCall)
   const ambientVolumeRef = useRef(ambientVolume)
+  const kbCollectionIdsRef = useRef(kbCollectionIds)
 
   useEffect(() => { systemPromptRef.current = systemPrompt }, [systemPrompt])
   useEffect(() => { languageRef.current = language }, [language])
@@ -79,6 +81,7 @@ export default function useGeminiVoice(
   useEffect(() => { ambientAlwaysRef.current = ambientAlways }, [ambientAlways])
   useEffect(() => { ambientToolCallRef.current = ambientToolCall }, [ambientToolCall])
   useEffect(() => { ambientVolumeRef.current = ambientVolume }, [ambientVolume])
+  useEffect(() => { kbCollectionIdsRef.current = kbCollectionIds }, [kbCollectionIds])
   useEffect(() => { inCallRef.current = inCall }, [inCall])
 
   function appendTranscript(role: 'user' | 'model', text: string) {
@@ -135,6 +138,7 @@ export default function useGeminiVoice(
         language: languageRef.current,
         voice: voiceRef.current,
         tool_ids: toolIdsRef.current,
+        kb_collection_ids: kbCollectionIdsRef.current,
         ambient_always: ambientAlwaysRef.current,
         ambient_tool_call: ambientToolCallRef.current,
         ambient_volume: ambientVolumeRef.current,

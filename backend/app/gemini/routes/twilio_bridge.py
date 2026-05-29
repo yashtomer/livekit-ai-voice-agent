@@ -195,7 +195,8 @@ async def twilio_stream(ws: WebSocket):
                 call_language = _agent.language      if _agent else PHONE_LANGUAGE
                 call_voice    = _agent.voice         if _agent else "Aoede"
                 call_tool_ids = list(_agent.tool_ids or []) if _agent else []
-                call_tools    = await build_gemini_tools(call_tool_ids)
+                call_kb_ids   = list(getattr(_agent, "kb_collection_ids", None) or []) if _agent else []
+                call_tools    = await build_gemini_tools(call_tool_ids, call_kb_ids)
                 _ambient_always_slug    = getattr(_agent, "ambient_always", None) if _agent else None
                 _ambient_tool_call_slug = getattr(_agent, "ambient_tool_call", None) if _agent else None
                 _ambient_vol            = getattr(_agent, "ambient_volume", 0.15) if _agent else 0.15
@@ -308,7 +309,7 @@ async def twilio_stream(ws: WebSocket):
                                             filler_box["task"] = asyncio.create_task(_filler_loop())
                                         tool_responses = []
                                         for fc in tc.function_calls:
-                                            result = await dispatch_tool_call(call_tool_ids, fc.name, dict(fc.args or {}))
+                                            result = await dispatch_tool_call(call_tool_ids, fc.name, dict(fc.args or {}), kb_collection_ids=call_kb_ids)
                                             log.info("🔧 tool %s(%s) → %s", fc.name, dict(fc.args or {}), result)
                                             tool_responses.append(
                                                 types.FunctionResponse(id=fc.id, name=fc.name, response=result)

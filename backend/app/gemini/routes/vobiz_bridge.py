@@ -134,6 +134,7 @@ class OutboundCallRequest(BaseModel):
     language: str | None = None       # optional: override PHONE_LANGUAGE
     voice: str | None = None          # optional: override default voice
     tool_ids: list[int] | None = None  # optional: tools to expose to the agent
+    kb_collection_ids: list[int] | None = None  # optional: KB collections the agent can search
     ambient_always: str | None = None        # optional: ambient slug played continuously
     ambient_tool_call: str | None = None     # optional: ambient slug played during tool calls
     ambient_volume: float | None = None      # optional: 0..1, default 0.15
@@ -162,6 +163,7 @@ async def make_outbound_call(
         "language":          (req.language or "").strip() or PHONE_LANGUAGE,
         "voice":             (req.voice or "").strip() or "Aoede",
         "tool_ids":          list(req.tool_ids or []),
+        "kb_collection_ids": list(req.kb_collection_ids or []),
         "ambient_always":    (req.ambient_always or None) or None,
         "ambient_tool_call": (req.ambient_tool_call or None) or None,
         "ambient_volume":    req.ambient_volume if req.ambient_volume is not None else 0.15,
@@ -278,6 +280,7 @@ async def vobiz_stream(ws: WebSocket):
         call_language = call_cfg["language"]
         call_voice    = call_cfg["voice"]
         call_tool_ids = list(call_cfg.get("tool_ids") or [])
+        call_kb_ids   = list(call_cfg.get("kb_collection_ids") or [])
         _ambient_always_slug    = call_cfg.get("ambient_always") or None
         _ambient_tool_call_slug = call_cfg.get("ambient_tool_call") or None
         _ambient_vol            = float(call_cfg.get("ambient_volume") or 0.15)
@@ -289,10 +292,11 @@ async def vobiz_stream(ws: WebSocket):
         call_language = _agent.language      if _agent else PHONE_LANGUAGE
         call_voice    = _agent.voice         if _agent else "Aoede"
         call_tool_ids = list(_agent.tool_ids or []) if _agent else []
+        call_kb_ids   = list(getattr(_agent, "kb_collection_ids", None) or []) if _agent else []
         _ambient_always_slug    = getattr(_agent, "ambient_always", None) if _agent else None
         _ambient_tool_call_slug = getattr(_agent, "ambient_tool_call", None) if _agent else None
         _ambient_vol            = getattr(_agent, "ambient_volume", 0.15) if _agent else 0.15
-    call_tools = await build_gemini_tools(call_tool_ids)
+    call_tools = await build_gemini_tools(call_tool_ids, call_kb_ids)
     always_mixer = AmbientMixer(_ambient_always_slug,    OUTPUT_SAMPLE_RATE, _ambient_vol)
     tool_mixer   = AmbientMixer(_ambient_tool_call_slug, OUTPUT_SAMPLE_RATE, _ambient_vol)
 
@@ -444,7 +448,7 @@ async def vobiz_stream(ws: WebSocket):
                                     filler_box["task"] = asyncio.create_task(_filler_loop())
                                 tool_responses = []
                                 for fc in tc.function_calls:
-                                    result = await dispatch_tool_call(call_tool_ids, fc.name, dict(fc.args or {}))
+                                    result = await dispatch_tool_call(call_tool_ids, fc.name, dict(fc.args or {}), kb_collection_ids=call_kb_ids)
                                     log.info("🔧 tool %s(%s) → %s", fc.name, dict(fc.args or {}), result)
                                     tool_responses.append(
                                         gtypes.FunctionResponse(
