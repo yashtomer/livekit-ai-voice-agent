@@ -309,5 +309,52 @@ async def seed_builtin_tools() -> None:
                     agent.tool_ids = current
                     await db.commit()
                     log.info("Linked builtin tool to healthcare_booking agent")
+
+            # ── transfer_call builtin (warm hand-off to a human agent) ──
+            transfer = (await db.execute(
+                select(GeminiTool).where(GeminiTool.slug == "transfer_call")
+            )).scalar_one_or_none()
+            if not transfer:
+                transfer = GeminiTool(
+                    slug="transfer_call",
+                    name="Transfer to Human",
+                    description=(
+                        "Hand the call off to a live human agent. Use when the caller asks "
+                        "for a human/manager, or is clearly frustrated and you can't help. "
+                        "Tell the caller you're connecting them first. Works on phone calls "
+                        "(Twilio/Vobiz); not available on browser calls."
+                    ),
+                    http_method="GET",
+                    url=None,
+                    headers={},
+                    parameters=[
+                        {"name": "reason", "type": "string", "required": False,
+                         "description": "Short reason for the transfer (e.g. 'caller frustrated')."},
+                    ],
+                    response_schema=[
+                        {"key": "status",         "type": "string", "description": "'ok' when transfer started, 'unavailable' on browser, 'error' otherwise."},
+                        {"key": "message",         "type": "string", "description": "Human-readable result to read out to the caller."},
+                        {"key": "transferred_to",  "type": "string", "description": "The human-agent number the call was redirected to (when status=ok)."},
+                    ],
+                    is_builtin=True,
+                )
+                db.add(transfer)
+                await db.commit()
+                await db.refresh(transfer)
+                log.info("Seeded builtin tool: transfer_call (id=%d)", transfer.id)
+
+            # Link transfer_call to the phone-facing demo agents.
+            for slug in ("healthcare_booking", "customer_support", "sales_agent"):
+                ag = (await db.execute(
+                    select(GeminiAgent).where(GeminiAgent.slug == slug)
+                )).scalar_one_or_none()
+                if not ag:
+                    continue
+                current = list(ag.tool_ids or [])
+                if transfer.id not in current:
+                    current.append(transfer.id)
+                    ag.tool_ids = current
+                    await db.commit()
+                    log.info("Linked transfer_call to %s agent", slug)
     except Exception:
         log.exception("seed_builtin_tools failed")

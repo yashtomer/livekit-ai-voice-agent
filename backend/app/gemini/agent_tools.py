@@ -104,6 +104,23 @@ def get_doctors_by_department(department: str) -> dict[str, Any]:
     }
 
 
+def transfer_call(reason: str = "") -> dict[str, Any]:
+    """Browser-call fallback for the transfer_call tool.
+
+    On phone calls (Twilio/Vobiz) the bridge intercepts `transfer_call` and
+    performs a real telephony transfer. On browser calls there is no PSTN leg
+    to redirect, so we return a graceful message the agent can read out.
+    """
+    log.info("transfer_call requested (browser, no PSTN leg): reason=%r", reason)
+    return {
+        "status": "unavailable",
+        "message": (
+            "Live transfer to a human is only available on phone calls. "
+            "Please offer to take a message or share a callback number."
+        ),
+    }
+
+
 # ── Gemini FunctionDeclarations + registry ───────────────────────────────────
 
 def _build_function_declarations():
@@ -133,12 +150,34 @@ def _build_function_declarations():
                 "required": ["department"],
             },
         ),
+        types.FunctionDeclaration(
+            name="transfer_call",
+            description=(
+                "Hand the call off to a live human agent. Call this when the caller "
+                "explicitly asks to speak to a human/manager/person, OR when they are "
+                "clearly frustrated or upset and you cannot resolve their issue. "
+                "Before calling it, briefly tell the caller you're connecting them now. "
+                "On phone calls this redirects the call to a human; on browser calls it "
+                "is not available (you'll get status='unavailable')."
+            ),
+            parameters={
+                "type": "OBJECT",
+                "properties": {
+                    "reason": {
+                        "type": "STRING",
+                        "description": "Short reason for the transfer (e.g. 'caller frustrated', 'requested manager').",
+                    },
+                },
+                "required": [],
+            },
+        ),
     ]
 
 
 # name → callable mapping used by the live-session tool dispatcher
 TOOL_REGISTRY: dict[str, Callable[..., Any]] = {
     "get_doctors_by_department": get_doctors_by_department,
+    "transfer_call": transfer_call,
 }
 
 

@@ -7,8 +7,9 @@ Failures are logged and swallowed — logging must never break a live call.
 from __future__ import annotations
 
 import logging
+import os
 from datetime import datetime
-from typing import Optional
+from typing import Any, Optional
 
 from sqlalchemy import select
 
@@ -16,6 +17,8 @@ from ...db import SessionLocal
 from ..models.call_log import GeminiCallLog
 
 log = logging.getLogger("gemini_logger")
+
+SUMMARY_MODEL = os.environ.get("GEMINI_SUMMARY_MODEL", "gemini-2.5-flash")
 
 
 async def start_call(
@@ -69,9 +72,51 @@ async def add_transcript(call_id: Optional[int], role: str, text: str) -> None:
         log.exception("gemini_logger.add_transcript failed")
 
 
-async def end_call(call_id: Optional[int], *, status: str = "ended", error_message: Optional[str] = None) -> None:
+async def add_tool_event(call_id: Optional[int], name: str, args: dict, result: Any) -> None:
+    """Record a tool/function call in the transcript timeline (role='tool').
+
+    Stored inline with the conversation so the call history can show what the
+    agent looked up and what it got back, in order.
+    """
+    if not call_id or not name:
+        return
+    try:
+        # Keep the stored result compact — a short JSON-ish preview is enough
+        # for the timeline; the full payload lives only in the live session.
+        preview = result
+        if isinstance(result, (dict, list)):
+            import json as _json
+            preview = _json.dumps(result)[:600]
+        elif result is not None:
+            preview = str(result)[:600]
+        async with SessionLocal() as db:
+            row = (await db.execute(select(GeminiCallLog).where(GeminiCallLog.id == call_id))).scalar_one_or_none()
+            if not row:
+                return
+            entries = list(row.transcript or [])
+            entries.append({
+                "role": "tool",
+                "name": name,
+                "args": args or {},
+                "result": preview,
+                "ts": datetime.utcnow().isoformat() + "Z",
+            })
+            row.transcript = entries
+            await db.commit()
+    except Exception:
+        log.exception("gemini_logger.add_tool_event failed")
+
+
+async def end_call(
+    call_id: Optional[int],
+    *,
+    status: str = "ended",
+    error_message: Optional[str] = None,
+    api_key: Optional[str] = None,
+) -> None:
     if not call_id:
         return
+    transcript = None
     try:
         async with SessionLocal() as db:
             row = (await db.execute(select(GeminiCallLog).where(GeminiCallLog.id == call_id))).scalar_one_or_none()
@@ -85,6 +130,92 @@ async def end_call(call_id: Optional[int], *, status: str = "ended", error_messa
             if row.started_at:
                 started = row.started_at
                 row.duration_s = max(0, int((ended - started).total_seconds()))
+            transcript = list(row.transcript or [])
             await db.commit()
     except Exception:
         log.exception("gemini_logger.end_call failed")
+        return
+
+    # Best-effort post-call analysis. Never let a failure here affect the call.
+    if status == "ended" and api_key and transcript:
+        try:
+            await _generate_summary(call_id, transcript, api_key)
+        except Exception:
+            log.exception("gemini_logger post-call summary failed")
+
+
+# ── Post-call AI analysis ─────────────────────────────────────────────────────
+
+_SUMMARY_INSTRUCTION = (
+    "You analyse a finished voice-call transcript between a USER (caller) and a "
+    "MODEL (AI agent). TOOL lines are function calls the agent made.\n"
+    "Return ONLY a JSON object (no markdown fences) with exactly these keys:\n"
+    '  "summary"   : a 1-2 sentence recap of what happened and any outcome.\n'
+    '  "sentiment" : one of "positive", "neutral", "negative" — the caller\'s overall mood.\n'
+    '  "extracted" : an object of the key facts captured during the call '
+    "(e.g. names, dates, times, order IDs, intent, resolution). Use null/empty "
+    "object if nothing concrete was captured.\n"
+)
+
+
+def _transcript_to_text(transcript: list[dict]) -> str:
+    lines: list[str] = []
+    for e in transcript:
+        role = (e.get("role") or "").upper()
+        if role == "TOOL":
+            lines.append(f"TOOL: {e.get('name')}({e.get('args')}) -> {e.get('result')}")
+        else:
+            txt = (e.get("text") or "").strip()
+            if txt:
+                lines.append(f"{role}: {txt}")
+    return "\n".join(lines)[:12000]
+
+
+async def _generate_summary(call_id: int, transcript: list[dict], api_key: str) -> None:
+    convo = _transcript_to_text(transcript)
+    if not convo.strip():
+        return
+
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=api_key)
+    resp = await client.aio.models.generate_content(
+        model=SUMMARY_MODEL,
+        contents=convo,
+        config=types.GenerateContentConfig(
+            system_instruction=_SUMMARY_INSTRUCTION,
+            response_mime_type="application/json",
+            temperature=0.2,
+        ),
+    )
+
+    import json as _json
+    raw = (resp.text or "").strip()
+    try:
+        data = _json.loads(raw)
+    except Exception:
+        # Tolerate stray markdown fences.
+        cleaned = raw.strip().lstrip("`").removeprefix("json").strip().rstrip("`").strip()
+        data = _json.loads(cleaned)
+
+    summary = (data.get("summary") or "").strip()[:2000] or None
+    sentiment = (data.get("sentiment") or "").strip().lower() or None
+    if sentiment not in ("positive", "neutral", "negative"):
+        sentiment = None
+    extracted = data.get("extracted")
+    if not isinstance(extracted, (dict, list)):
+        extracted = None
+
+    try:
+        async with SessionLocal() as db:
+            row = (await db.execute(select(GeminiCallLog).where(GeminiCallLog.id == call_id))).scalar_one_or_none()
+            if not row:
+                return
+            row.summary = summary
+            row.sentiment = sentiment
+            row.extracted = extracted
+            await db.commit()
+            log.info("📝 call %d analysed: sentiment=%s", call_id, sentiment)
+    except Exception:
+        log.exception("gemini_logger._generate_summary persist failed")

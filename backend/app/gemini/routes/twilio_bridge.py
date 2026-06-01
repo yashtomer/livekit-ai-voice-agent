@@ -17,9 +17,10 @@ import os
 from fastapi import APIRouter, Request, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.responses import Response, JSONResponse
 
-from ..services.logger import start_call, add_transcript, end_call
+from ..services.logger import start_call, add_transcript, add_tool_event, end_call
 from ..services.agents_store import get_default_phone_agent
 from ..services.tools_runtime import build_gemini_tools, dispatch_tool_call
+from ..services.transfer import twilio_transfer, resolve_transfer_number
 from ..agents import DEFAULT_PHONE_AGENT
 from ..ambience import AmbientMixer
 
@@ -177,6 +178,7 @@ async def twilio_stream(ws: WebSocket):
         return
 
     stream_sid: str | None = None
+    twilio_call_sid: str | None = None
     in_state = None
     out_state = None
     call_id: int | None = None
@@ -187,7 +189,8 @@ async def twilio_stream(ws: WebSocket):
             msg = json.loads(raw)
             if msg.get("event") == "start":
                 stream_sid = msg["start"]["streamSid"]
-                log.info("Stream %s started", stream_sid)
+                twilio_call_sid = (msg.get("start") or {}).get("callSid")
+                log.info("Stream %s started (call %s)", stream_sid, twilio_call_sid)
                 custom = (msg.get("start") or {}).get("customParameters") or {}
                 # Resolve default agent from DB; fall back to the env/static prompt.
                 _agent = await get_default_phone_agent()
@@ -309,8 +312,17 @@ async def twilio_stream(ws: WebSocket):
                                             filler_box["task"] = asyncio.create_task(_filler_loop())
                                         tool_responses = []
                                         for fc in tc.function_calls:
-                                            result = await dispatch_tool_call(call_tool_ids, fc.name, dict(fc.args or {}), kb_collection_ids=call_kb_ids)
-                                            log.info("🔧 tool %s(%s) → %s", fc.name, dict(fc.args or {}), result)
+                                            _args = dict(fc.args or {})
+                                            if fc.name == "transfer_call":
+                                                result = await twilio_transfer(
+                                                    twilio_call_sid,
+                                                    resolve_transfer_number(),
+                                                    str(_args.get("reason") or ""),
+                                                )
+                                            else:
+                                                result = await dispatch_tool_call(call_tool_ids, fc.name, _args, kb_collection_ids=call_kb_ids)
+                                            log.info("🔧 tool %s(%s) → %s", fc.name, _args, result)
+                                            await add_tool_event(call_id, fc.name, _args, result)
                                             tool_responses.append(
                                                 types.FunctionResponse(id=fc.id, name=fc.name, response=result)
                                             )
@@ -384,4 +396,4 @@ async def twilio_stream(ws: WebSocket):
         await end_call(call_id, status="error", error_message=str(exc))
         return
     finally:
-        await end_call(call_id)
+        await end_call(call_id, api_key=GOOGLE_API_KEY or None)

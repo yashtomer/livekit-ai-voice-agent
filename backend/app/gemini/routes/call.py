@@ -22,7 +22,8 @@ from ...models.user import User, UserRole
 from ...models.api_key import UserAPIKey
 from ...services.auth import decode_token
 from ...services.encryption import decrypt_key
-from ..services.logger import start_call, add_transcript, end_call
+from ..services.logger import start_call, add_transcript, add_tool_event, end_call
+from ..services.sentiment import score_text
 from ..ambience import AmbientMixer
 
 OUTPUT_SAMPLE_RATE = 24000
@@ -292,8 +293,17 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
                                             nonlocal_filler["task"] = asyncio.create_task(_ambient_filler())
                                         tool_responses = []
                                         for fc in tc.function_calls:
-                                            result = await _dispatch(tool_ids, fc.name, dict(fc.args or {}), kb_collection_ids=kb_collection_ids)
-                                            log.info("🔧 tool %s(%s) → %s", fc.name, dict(fc.args or {}), result)
+                                            args = dict(fc.args or {})
+                                            result = await _dispatch(tool_ids, fc.name, args, kb_collection_ids=kb_collection_ids)
+                                            log.info("🔧 tool %s(%s) → %s", fc.name, args, result)
+                                            # Surface the tool call in the live UI timeline and persist it.
+                                            await _send(websocket, {
+                                                "type": "tool",
+                                                "name": fc.name,
+                                                "args": args,
+                                                "status": (result or {}).get("status") if isinstance(result, dict) else None,
+                                            })
+                                            await add_tool_event(call_id, fc.name, args, result)
                                             tool_responses.append(
                                                 types.FunctionResponse(id=fc.id, name=fc.name, response=result)
                                             )
@@ -307,7 +317,9 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
                                         if first_audio_ts is None:
                                             first_audio_ts = time.monotonic()
                                             if user_end_ts is not None:
-                                                log.info("⏱ user→first audio: %.0f ms", (first_audio_ts - user_end_ts) * 1000)
+                                                latency_ms = (first_audio_ts - user_end_ts) * 1000
+                                                log.info("⏱ user→first audio: %.0f ms", latency_ms)
+                                                await _send(websocket, {"type": "metric", "latency_ms": round(latency_ms)})
                                         mixed = always_mixer.mix(response.data)
                                         try:
                                             await websocket.send_bytes(mixed)
@@ -342,6 +354,9 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
                                             if text:
                                                 await _send(websocket, {"type": "transcript", "role": "user", "text": text})
                                                 await add_transcript(call_id, "user", text)
+                                                # Live sentiment cue (lexicon heuristic, no extra LLM call).
+                                                s = score_text(text)
+                                                await _send(websocket, {"type": "sentiment", **s})
                                         if model_chunks:
                                             text = "".join(model_chunks).strip()
                                             if text:
@@ -409,4 +424,4 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
         await end_call(call_id, status="error", error_message=str(exc))
         return
     finally:
-        await end_call(call_id)
+        await end_call(call_id, api_key=api_key)

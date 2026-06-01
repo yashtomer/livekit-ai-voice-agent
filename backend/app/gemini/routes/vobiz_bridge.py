@@ -34,9 +34,10 @@ from pydantic import BaseModel
 
 from ...models.user import User
 from ...routes.auth import get_current_user
-from ..services.logger import start_call, add_transcript, end_call
+from ..services.logger import start_call, add_transcript, add_tool_event, end_call
 from ..services.agents_store import get_default_phone_agent
 from ..services.tools_runtime import build_gemini_tools, dispatch_tool_call
+from ..services.transfer import vobiz_transfer, resolve_transfer_number
 from ..agents import DEFAULT_PHONE_AGENT
 from ..ambience import AmbientMixer
 
@@ -51,6 +52,17 @@ PHONE_LANGUAGE     = os.environ.get("PHONE_LANGUAGE", "en")
 VOBIZ_AUTH_ID      = os.environ.get("VOBIZ_AUTH_ID", "").strip()
 VOBIZ_AUTH_TOKEN   = os.environ.get("VOBIZ_AUTH_TOKEN", "").strip()
 VOBIZ_PHONE_NUMBER = os.environ.get("VOBIZ_PHONE_NUMBER", "").strip()
+# Local dev only: Vobiz (cloud) can't reach localhost/the container, so set
+# NGROK_URL to the public tunnel host. When unset (production), webhook/answer
+# URLs fall back to the inbound request host. The WS handler especially needs
+# this — `ws.url.hostname` there is the internal host, never the public one.
+NGROK_URL = os.environ.get("NGROK_URL", "").strip()
+
+
+def _public_host(fallback: str) -> str:
+    if NGROK_URL:
+        return NGROK_URL.replace("https://", "").replace("http://", "").rstrip("/")
+    return fallback
 
 MODEL = os.environ.get("GEMINI_LIVE_MODEL", "gemini-2.0-flash-live-001")
 API_VERSION = os.environ.get("GEMINI_API_VERSION", "v1beta")
@@ -138,6 +150,7 @@ class OutboundCallRequest(BaseModel):
     ambient_always: str | None = None        # optional: ambient slug played continuously
     ambient_tool_call: str | None = None     # optional: ambient slug played during tool calls
     ambient_volume: float | None = None      # optional: 0..1, default 0.15
+    transfer_number: str | None = None       # optional: human-agent number for transfer_call (falls back to HUMAN_AGENT_NUMBER)
 
 
 @router.post("/call")
@@ -167,11 +180,12 @@ async def make_outbound_call(
         "ambient_always":    (req.ambient_always or None) or None,
         "ambient_tool_call": (req.ambient_tool_call or None) or None,
         "ambient_volume":    req.ambient_volume if req.ambient_volume is not None else 0.15,
+        "transfer_number":   (req.transfer_number or "").strip() or None,
         "to":                req.to,
         "_ts":               datetime.utcnow().timestamp(),
     }
 
-    host = request.url.hostname
+    host = _public_host(request.url.hostname)
     url = f"https://api.vobiz.ai/api/v1/Account/{VOBIZ_AUTH_ID}/Call/"
     answer_url = f"https://{host}/api/vobiz/voice?cfg={cfg_id}"
     hangup_url = f"https://{host}/api/vobiz/status"
@@ -213,7 +227,7 @@ async def make_outbound_call(
 async def voice_webhook(request: Request):
     """Vobiz hits this when a call comes in. Returns XML telling Vobiz to
     open a bidirectional WebSocket to our /stream endpoint."""
-    host = request.url.hostname
+    host = _public_host(request.url.hostname)
     cfg = request.query_params.get("cfg", "")
     ws_url = f"wss://{host}/api/vobiz/stream"
     if cfg:
@@ -227,6 +241,28 @@ async def voice_webhook(request: Request):
     {ws_url}
   </Stream>
 </Response>"""
+    return Response(content=xml, media_type="application/xml")
+
+
+@router.post("/transfer")
+@router.get("/transfer")
+async def transfer_webhook(request: Request):
+    """Answer URL used by a `transfer_call` hand-off. Returns XML that dials the
+    configured human-agent number, replacing the AI leg with a live person."""
+    to = request.query_params.get("to", "").strip()
+    if not to:
+        xml = ('<?xml version="1.0" encoding="UTF-8"?>'
+               "<Response><Speak>Sorry, no agent is available right now.</Speak><Hangup/></Response>")
+        return Response(content=xml, media_type="application/xml")
+    caller_id = VOBIZ_PHONE_NUMBER.lstrip("+") if VOBIZ_PHONE_NUMBER else ""
+    dial_open = f'<Dial callerId="{caller_id}">' if caller_id else "<Dial>"
+    xml = (
+        '<?xml version="1.0" encoding="UTF-8"?>'
+        "<Response>"
+        "<Speak>Please hold while I connect you to a human agent.</Speak>"
+        f"{dial_open}<Number>{to}</Number></Dial>"
+        "</Response>"
+    )
     return Response(content=xml, media_type="application/xml")
 
 
@@ -448,8 +484,18 @@ async def vobiz_stream(ws: WebSocket):
                                     filler_box["task"] = asyncio.create_task(_filler_loop())
                                 tool_responses = []
                                 for fc in tc.function_calls:
-                                    result = await dispatch_tool_call(call_tool_ids, fc.name, dict(fc.args or {}), kb_collection_ids=call_kb_ids)
-                                    log.info("🔧 tool %s(%s) → %s", fc.name, dict(fc.args or {}), result)
+                                    _args = dict(fc.args or {})
+                                    if fc.name == "transfer_call":
+                                        result = await vobiz_transfer(
+                                            call_id,
+                                            resolve_transfer_number((call_cfg or {}).get("transfer_number")),
+                                            _public_host(ws.url.hostname or ""),
+                                            str(_args.get("reason") or ""),
+                                        )
+                                    else:
+                                        result = await dispatch_tool_call(call_tool_ids, fc.name, _args, kb_collection_ids=call_kb_ids)
+                                    log.info("🔧 tool %s(%s) → %s", fc.name, _args, result)
+                                    await add_tool_event(log_id, fc.name, _args, result)
                                     tool_responses.append(
                                         gtypes.FunctionResponse(
                                             id=fc.id,
@@ -501,4 +547,4 @@ async def vobiz_stream(ws: WebSocket):
         await end_call(log_id, status="error", error_message=str(exc))
         return
     finally:
-        await end_call(log_id)
+        await end_call(log_id, api_key=GOOGLE_API_KEY or None)

@@ -2,9 +2,10 @@ import { useState, useEffect, useRef, useCallback, type ComponentType, type Reac
 import { useQuery } from '@tanstack/react-query'
 import api from '../api/client'
 import { Device, Call } from '@twilio/voice-sdk'
-import { Phone, PhoneOff, Mic, MicOff, ChevronDown, Settings, Home, ListVideo, Eye, X, RefreshCw, Play, Loader2, Mic2, FileCode, ArrowRight, Globe, Cloud, Server, Cpu, PhoneCall, Wrench, Bot, Plus, Pencil, Trash2, Star, Lock, Webhook, FlaskConical, IndianRupee, Volume2, VolumeX, ArrowLeft, Music, BookOpen, FileText, Upload, Search, Database } from 'lucide-react'
+import { Phone, PhoneOff, Mic, MicOff, ChevronDown, Settings, Home, ListVideo, Eye, X, RefreshCw, Play, Loader2, Mic2, FileCode, ArrowRight, Globe, Cloud, Server, Cpu, PhoneCall, Wrench, Bot, Plus, Pencil, Trash2, Star, Lock, Webhook, FlaskConical, IndianRupee, Volume2, VolumeX, ArrowLeft, Music, BookOpen, FileText, Upload, Search, Database, BarChart3, Clock, TrendingUp, AlertTriangle } from 'lucide-react'
 import Layout from '../components/Layout'
 import useGeminiVoice, { type GeminiStatus } from '../hooks/useGeminiVoice'
+import GeminiAvatar from '../components/GeminiAvatar'
 import { useUIStore } from '../store/uiStore'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -34,6 +35,60 @@ function formatDuration(s: number | null): string {
   const m = Math.floor(s / 60)
   const r = s % 60
   return `${m}m ${r}s`
+}
+
+/** Inline timeline chip for a tool/function call made by the agent. */
+function ToolChip({ name, args, status, result }: {
+  name?: string
+  args?: Record<string, unknown> | null
+  status?: string | null
+  result?: unknown
+}) {
+  const argStr = args && Object.keys(args).length
+    ? Object.entries(args).map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`).join(', ')
+    : ''
+  const ok = status == null || status === 'ok'
+  return (
+    <div className="flex justify-center my-1">
+      <div className="max-w-[90%] flex items-start gap-2 px-2.5 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-700 dark:text-amber-300">
+        <Wrench className="w-3 h-3 mt-0.5 flex-shrink-0" />
+        <div className="min-w-0">
+          <span className="font-semibold font-mono">{name || 'tool'}</span>
+          {argStr && <span className="opacity-70"> ({argStr})</span>}
+          {status && !ok && <span className="ml-1 font-semibold text-destructive">· {status}</span>}
+          {result != null && (
+            <span className="block opacity-60 mt-0.5 break-all">
+              → {typeof result === 'string' ? result.slice(0, 200) : JSON.stringify(result).slice(0, 200)}
+            </span>
+          )}
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** Compact live caller-sentiment meter (positive ↔ negative + frustration cue). */
+function SentimentMeter({ sentiment }: { sentiment: { label: string; score: number; frustration: number } | null }) {
+  const score = sentiment?.score ?? 0
+  const label = sentiment?.label ?? 'neutral'
+  const frustrated = (sentiment?.frustration ?? 0) >= 0.5
+  // Map score [-1,1] → marker position [0,100]%.
+  const pos = Math.round(((score + 1) / 2) * 100)
+  const color = label === 'positive' ? 'text-green-600 dark:text-green-400'
+    : label === 'negative' ? 'text-destructive' : 'text-amber-600 dark:text-amber-400'
+  return (
+    <div className="flex items-center gap-2" title="Live caller sentiment (heuristic)">
+      <span className={`text-[11px] font-semibold capitalize ${color}`}>
+        {frustrated ? '😠 ' : label === 'positive' ? '🙂 ' : ''}{label}
+      </span>
+      <div className="relative w-24 h-2 rounded-full overflow-hidden" style={{ background: 'linear-gradient(to right, #ef4444, #f59e0b, #22c55e)' }}>
+        <span
+          className="absolute top-1/2 -translate-y-1/2 w-1.5 h-3 bg-foreground rounded-full border border-card transition-all duration-500"
+          style={{ left: `calc(${pos}% - 3px)` }}
+        />
+      </div>
+    </div>
+  )
 }
 
 type AgentTemplate = {
@@ -178,38 +233,6 @@ const STATUS_META: Record<GeminiStatus, { label: string; color: string; dot: str
   processing: { label: 'Processing',  color: 'text-blue-500',                     dot: 'bg-blue-500 animate-pulse' },
   speaking:   { label: 'Speaking',    color: 'text-purple-400',                   dot: 'bg-purple-400 animate-pulse' },
   error:      { label: 'Error',       color: 'text-destructive',                  dot: 'bg-destructive' },
-}
-
-// ── Orb component ────────────────────────────────────────────────────────────
-
-function AgentOrb({ inCall, status }: { inCall: boolean; status: GeminiStatus }) {
-  const isListening = inCall && status === 'listening'
-  const isSpeaking  = inCall && status === 'speaking'
-
-  return (
-    <div className="relative flex items-center justify-center w-[260px] h-[260px]">
-      {isListening && (
-        <>
-          <span className="gemini-orb-ring absolute" />
-          <span className="gemini-orb-ring gemini-orb-ring--2 absolute" />
-          <span className="gemini-orb-ring gemini-orb-ring--3 absolute" />
-        </>
-      )}
-      <div className={`gemini-orb ${inCall ? 'gemini-orb--active' : ''} ${isSpeaking ? 'gemini-orb--speaking' : ''}`}>
-        <svg className="gemini-orb-pattern" viewBox="0 0 120 120" fill="none">
-          <circle cx="60" cy="60" r="28" stroke="rgba(255,255,255,0.35)" strokeWidth="1" />
-          <circle cx="60" cy="60" r="18" stroke="rgba(255,255,255,0.25)" strokeWidth="1" />
-          <circle cx="60" cy="32" r="28" stroke="rgba(255,255,255,0.18)" strokeWidth="0.8" />
-          <circle cx="60" cy="88" r="28" stroke="rgba(255,255,255,0.18)" strokeWidth="0.8" />
-          <circle cx="36" cy="46" r="28" stroke="rgba(255,255,255,0.18)" strokeWidth="0.8" />
-          <circle cx="84" cy="46" r="28" stroke="rgba(255,255,255,0.18)" strokeWidth="0.8" />
-          <circle cx="36" cy="74" r="28" stroke="rgba(255,255,255,0.18)" strokeWidth="0.8" />
-          <circle cx="84" cy="74" r="28" stroke="rgba(255,255,255,0.18)" strokeWidth="0.8" />
-          <circle cx="60" cy="60" r="6" fill="rgba(255,255,255,0.5)" />
-        </svg>
-      </div>
-    </div>
-  )
 }
 
 // ── Twilio Config Card ───────────────────────────────────────────────────────
@@ -682,15 +705,206 @@ type CallSummary = {
   ended_at: string | null
   duration_s: number | null
   turn_count: number
+  summary: string | null
+  sentiment: string | null
+}
+
+type TranscriptItem = {
+  role: string
+  text?: string
+  ts?: string
+  // tool events
+  name?: string
+  args?: Record<string, unknown>
+  result?: unknown
 }
 
 type CallDetail = CallSummary & {
   system_prompt: string | null
-  transcript: { role: string; text: string; ts: string }[]
+  transcript: TranscriptItem[]
   error_message: string | null
+  extracted: Record<string, unknown> | unknown[] | null
+}
+
+const SENTIMENT_BADGE: Record<string, string> = {
+  positive: 'bg-green-500/10 text-green-600 dark:text-green-400 border-green-500/20',
+  neutral:  'bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20',
+  negative: 'bg-destructive/10 text-destructive border-destructive/20',
 }
 
 const CALLS_PAGE_SIZE = 20
+
+// ── Analytics Dashboard ──────────────────────────────────────────────────────
+
+type CallStats = {
+  total_calls: number
+  ended_calls: number
+  active_calls: number
+  errored_calls: number
+  avg_duration_s: number
+  total_duration_s: number
+  by_type: { key: string; count: number }[]
+  by_language: { key: string; count: number }[]
+  by_sentiment: Record<string, number>
+  by_voice: { key: string; count: number }[]
+  top_tools: { key: string; count: number }[]
+  calls_by_day: { day: string; count: number }[]
+}
+
+function StatCard({ icon: Icon, label, value, sub, color }: {
+  icon: ComponentType<{ className?: string }>; label: string; value: string; sub?: string; color: string
+}) {
+  return (
+    <div className="card flex items-center gap-3 p-4">
+      <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${color}`}>
+        <Icon className="w-5 h-5" />
+      </div>
+      <div className="min-w-0">
+        <p className="text-[11px] uppercase tracking-wide font-semibold text-muted-foreground">{label}</p>
+        <p className="text-xl font-bold text-foreground leading-tight">{value}</p>
+        {sub && <p className="text-[11px] text-muted-foreground">{sub}</p>}
+      </div>
+    </div>
+  )
+}
+
+/** Horizontal bar list — used for breakdowns by type/language/tool. */
+function BarList({ title, data, labelMap }: {
+  title: string; data: { key: string; count: number }[]; labelMap?: Record<string, string>
+}) {
+  const max = Math.max(1, ...data.map(d => d.count))
+  return (
+    <div className="card flex flex-col gap-3 p-4">
+      <h3 className="text-sm font-bold text-foreground uppercase tracking-wide">{title}</h3>
+      {data.length === 0 ? (
+        <p className="text-xs text-muted-foreground py-2">No data yet.</p>
+      ) : data.map(d => (
+        <div key={d.key} className="flex items-center gap-2">
+          <span className="text-xs text-foreground w-28 truncate capitalize">{labelMap?.[d.key] || d.key}</span>
+          <div className="flex-1 h-2.5 bg-muted rounded-full overflow-hidden">
+            <div className="h-full bg-primary rounded-full" style={{ width: `${(d.count / max) * 100}%` }} />
+          </div>
+          <span className="text-xs font-mono text-muted-foreground w-8 text-right">{d.count}</span>
+        </div>
+      ))}
+    </div>
+  )
+}
+
+function AnalyticsView() {
+  const [stats, setStats] = useState<CallStats | null>(null)
+  const [loading, setLoading] = useState(true)
+  const [error, setError] = useState('')
+
+  const load = useCallback(async () => {
+    setLoading(true)
+    setError('')
+    try {
+      const res = await fetch(`${backendBase()}/api/gemini-calls/stats`)
+      if (!res.ok) throw new Error(`Failed: ${res.status}`)
+      setStats(await res.json())
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setLoading(false)
+    }
+  }, [])
+
+  useEffect(() => { load() }, [load])
+
+  const langMap = Object.fromEntries(LANGUAGES.map(l => [l.code, l.label]))
+  const typeMap = CALL_TYPE_LABEL
+  const sentiments = stats?.by_sentiment || {}
+  const sentTotal = (sentiments.positive || 0) + (sentiments.neutral || 0) + (sentiments.negative || 0)
+  const dayMax = Math.max(1, ...(stats?.calls_by_day || []).map(d => d.count))
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0 p-6 gap-4 overflow-y-auto">
+      <div className="flex items-center justify-between">
+        <div>
+          <h1 className="text-xl font-bold text-foreground">Analytics</h1>
+          <p className="text-sm text-muted-foreground">Aggregate insights across all Gemini Live calls</p>
+        </div>
+        <button
+          onClick={load}
+          className="flex items-center gap-2 px-3 py-1.5 text-sm rounded-lg border border-border bg-background hover:bg-muted transition-all"
+        >
+          <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
+          Refresh
+        </button>
+      </div>
+
+      {error && (
+        <div className="bg-destructive/10 border border-destructive/20 rounded-xl px-4 py-3 text-sm text-destructive">{error}</div>
+      )}
+
+      {!stats ? (
+        <p className="text-sm text-muted-foreground py-10 text-center">{loading ? 'Loading…' : 'No data.'}</p>
+      ) : (
+        <>
+          {/* Top stat cards */}
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            <StatCard icon={ListVideo} label="Total Calls" value={String(stats.total_calls)}
+              sub={`${stats.ended_calls} ended · ${stats.active_calls} active`} color="bg-blue-500/10 text-blue-600 dark:text-blue-400" />
+            <StatCard icon={Clock} label="Avg Duration" value={formatDuration(stats.avg_duration_s)}
+              sub={`${formatDuration(stats.total_duration_s)} total`} color="bg-violet-500/10 text-violet-600 dark:text-violet-400" />
+            <StatCard icon={TrendingUp} label="Positive" value={`${sentTotal ? Math.round((sentiments.positive || 0) / sentTotal * 100) : 0}%`}
+              sub={`${sentTotal} analysed`} color="bg-green-500/10 text-green-600 dark:text-green-400" />
+            <StatCard icon={AlertTriangle} label="Errored" value={String(stats.errored_calls)}
+              sub="failed sessions" color="bg-destructive/10 text-destructive" />
+          </div>
+
+          {/* Calls per day */}
+          <div className="card flex flex-col gap-3 p-4">
+            <h3 className="text-sm font-bold text-foreground uppercase tracking-wide">Calls per day</h3>
+            {stats.calls_by_day.length === 0 ? (
+              <p className="text-xs text-muted-foreground py-2">No data yet.</p>
+            ) : (
+              <div className="flex items-end gap-1.5 h-32">
+                {stats.calls_by_day.map(d => (
+                  <div key={d.day} className="flex-1 flex flex-col items-center justify-end gap-1 group" title={`${d.day}: ${d.count}`}>
+                    <span className="text-[9px] text-muted-foreground opacity-0 group-hover:opacity-100">{d.count}</span>
+                    <div className="w-full bg-primary/80 rounded-t hover:bg-primary transition-all" style={{ height: `${(d.count / dayMax) * 100}%`, minHeight: 2 }} />
+                    <span className="text-[8px] text-muted-foreground rotate-0 truncate w-full text-center">{d.day.slice(5)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+
+          {/* Sentiment breakdown */}
+          <div className="card flex flex-col gap-3 p-4">
+            <h3 className="text-sm font-bold text-foreground uppercase tracking-wide">Sentiment</h3>
+            {sentTotal === 0 ? (
+              <p className="text-xs text-muted-foreground py-2">No analysed calls yet.</p>
+            ) : (
+              <>
+                <div className="flex h-4 rounded-full overflow-hidden">
+                  <div className="bg-green-500" style={{ width: `${(sentiments.positive || 0) / sentTotal * 100}%` }} />
+                  <div className="bg-slate-400" style={{ width: `${(sentiments.neutral || 0) / sentTotal * 100}%` }} />
+                  <div className="bg-destructive" style={{ width: `${(sentiments.negative || 0) / sentTotal * 100}%` }} />
+                </div>
+                <div className="flex gap-4 text-xs text-muted-foreground">
+                  <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-green-500" /> Positive {sentiments.positive || 0}</span>
+                  <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-slate-400" /> Neutral {sentiments.neutral || 0}</span>
+                  <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-destructive" /> Negative {sentiments.negative || 0}</span>
+                </div>
+              </>
+            )}
+          </div>
+
+          {/* Breakdown grids */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            <BarList title="By channel" data={stats.by_type} labelMap={typeMap} />
+            <BarList title="By language" data={stats.by_language} labelMap={langMap} />
+            <BarList title="Top tools called" data={stats.top_tools} />
+            <BarList title="By voice" data={stats.by_voice} />
+          </div>
+        </>
+      )}
+    </div>
+  )
+}
 
 function CallsView() {
   const [items, setItems] = useState<CallSummary[]>([])
@@ -770,15 +984,16 @@ function CallsView() {
               <th className="px-4 py-3 font-semibold">Started</th>
               <th className="px-4 py-3 font-semibold">Duration</th>
               <th className="px-4 py-3 font-semibold">Turns</th>
+              <th className="px-4 py-3 font-semibold">Sentiment</th>
               <th className="px-4 py-3 font-semibold">Status</th>
               <th className="px-4 py-3 font-semibold text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
             {loading && items.length === 0 ? (
-              <tr><td colSpan={9} className="px-4 py-10 text-center text-muted-foreground">Loading…</td></tr>
+              <tr><td colSpan={10} className="px-4 py-10 text-center text-muted-foreground">Loading…</td></tr>
             ) : items.length === 0 ? (
-              <tr><td colSpan={9} className="px-4 py-10 text-center text-muted-foreground">No calls yet.</td></tr>
+              <tr><td colSpan={10} className="px-4 py-10 text-center text-muted-foreground">No calls yet.</td></tr>
             ) : items.map(row => (
               <tr key={row.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
                 <td className="px-4 py-3 font-mono text-xs text-muted-foreground">#{row.id}</td>
@@ -792,6 +1007,13 @@ function CallsView() {
                 <td className="px-4 py-3 text-muted-foreground">{formatDateTime(row.started_at)}</td>
                 <td className="px-4 py-3">{formatDuration(row.duration_s)}</td>
                 <td className="px-4 py-3 text-center">{row.turn_count}</td>
+                <td className="px-4 py-3">
+                  {row.sentiment ? (
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-semibold border capitalize ${SENTIMENT_BADGE[row.sentiment] || SENTIMENT_BADGE.neutral}`}>
+                      {row.sentiment}
+                    </span>
+                  ) : <span className="text-muted-foreground">—</span>}
+                </td>
                 <td className="px-4 py-3">
                   <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ${
                     row.status === 'ended' ? 'bg-green-500/10 text-green-600 dark:text-green-400'
@@ -865,9 +1087,38 @@ function CallsView() {
                   Error: {selected.error_message}
                 </div>
               )}
+
+              {/* AI post-call analysis */}
+              {(selected.summary || selected.sentiment || selected.extracted) && (
+                <div className="bg-primary/5 border border-primary/20 rounded-xl px-4 py-3 mb-3 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[11px] font-bold uppercase tracking-wide text-primary">AI Summary</span>
+                    {selected.sentiment && (
+                      <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold border capitalize ${SENTIMENT_BADGE[selected.sentiment] || SENTIMENT_BADGE.neutral}`}>
+                        {selected.sentiment}
+                      </span>
+                    )}
+                  </div>
+                  {selected.summary && <p className="text-sm text-foreground leading-relaxed">{selected.summary}</p>}
+                  {selected.extracted && typeof selected.extracted === 'object' && !Array.isArray(selected.extracted) && Object.keys(selected.extracted).length > 0 && (
+                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 pt-1">
+                      {Object.entries(selected.extracted as Record<string, unknown>).map(([k, v]) => (
+                        <div key={k} className="flex flex-col">
+                          <span className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground">{k.replace(/_/g, ' ')}</span>
+                          <span className="text-xs text-foreground break-words">{v == null ? '—' : typeof v === 'object' ? JSON.stringify(v) : String(v)}</span>
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+
               {selected.transcript.length === 0 ? (
                 <p className="text-sm text-muted-foreground text-center py-8">No transcript captured.</p>
               ) : selected.transcript.map((t, i) => (
+                t.role === 'tool' ? (
+                  <ToolChip key={i} name={t.name} args={t.args} result={t.result} />
+                ) : (
                 <div key={i} className={`flex ${t.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   <div className={`max-w-[80%] px-3 py-2 rounded-xl text-sm leading-relaxed ${
                     t.role === 'user'
@@ -880,6 +1131,7 @@ function CallsView() {
                     {t.text}
                   </div>
                 </div>
+                )
               ))}
             </div>
             {selected.system_prompt && (
@@ -2483,7 +2735,6 @@ function CostingView() {
           <code className="font-mono text-sm text-foreground font-bold block">gemini-3.1-flash-live-preview</code>
           <p className="text-xs text-muted-foreground mt-1.5 leading-relaxed">
             Native-audio preview model. Used by the browser (<code className="font-mono text-[11px]">/api/gemini/ws</code>) and Twilio bridge (<code className="font-mono text-[11px]">/api/twilio/stream</code>).
-            Vobiz outbound + voice-sample generation fall back to <code className="font-mono text-[11px]">gemini-2.0-flash-live-001</code>.
             Override via <code className="font-mono text-[11px]">GEMINI_LIVE_MODEL</code> env var.
           </p>
         </div>
@@ -2509,13 +2760,6 @@ function CostingView() {
                   <td className="px-3 py-2 text-right">$12.00</td>
                   <td className="px-3 py-2 text-right">$0.50</td>
                   <td className="px-3 py-2 text-right">$2.00</td>
-                </tr>
-                <tr className="border-t border-border">
-                  <td className="px-3 py-2">gemini-2.0-flash-live-001 <span className="text-[10px] font-sans uppercase tracking-wide text-muted-foreground ml-1">fallback</span></td>
-                  <td className="px-3 py-2 text-right">$0.35</td>
-                  <td className="px-3 py-2 text-right">$2.00</td>
-                  <td className="px-3 py-2 text-right">$0.35</td>
-                  <td className="px-3 py-2 text-right">$1.50</td>
                 </tr>
               </tbody>
             </table>
@@ -3117,7 +3361,7 @@ function KbCollectionDetail({ collection, onBack }: { collection: KbCollection; 
   )
 }
 
-type View = 'home' | 'calls' | 'voices' | 'techspecs' | 'agents' | 'tools' | 'costing' | 'kb'
+type View = 'home' | 'calls' | 'analytics' | 'voices' | 'techspecs' | 'agents' | 'tools' | 'costing' | 'kb'
 
 export default function GeminiPage() {
   const templates = useAgentTemplates(TEMPLATES)
@@ -3137,7 +3381,7 @@ export default function GeminiPage() {
 
   const { openConfigModal } = useUIStore()
 
-  const { status, inCall, isConnected, transcript, errorCode, startCall, hangUp, clearTranscript, clearError } =
+  const { status, inCall, isConnected, transcript, errorCode, lastLatencyMs, sentiment, startCall, hangUp, clearTranscript, clearError, playAnalyserRef } =
     useGeminiVoice(systemPrompt, language, voice, toolIds, ambientAlways, ambientToolCall, ambientVolume, kbCollectionIds)
 
   useEffect(() => {
@@ -3198,6 +3442,17 @@ export default function GeminiPage() {
           >
             <ListVideo className="w-4 h-4" />
             Calls
+          </button>
+          <button
+            onClick={() => { if (inCall) hangUp(); setView('analytics') }}
+            className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+              view === 'analytics'
+                ? 'bg-primary/10 text-primary border border-primary/20'
+                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+            }`}
+          >
+            <BarChart3 className="w-4 h-4" />
+            Analytics
           </button>
           <button
             onClick={() => { if (inCall) hangUp(); setView('voices') }}
@@ -3268,7 +3523,7 @@ export default function GeminiPage() {
         </aside>
 
         {/* ─── Main content ─── */}
-        {view === 'calls' ? <CallsView /> : view === 'voices' ? <VoicesView /> : view === 'techspecs' ? <TechSpecsView /> : view === 'agents' ? <AgentsView /> : view === 'tools' ? <ToolsView /> : view === 'costing' ? <CostingView /> : view === 'kb' ? <KnowledgeBaseView /> : (
+        {view === 'calls' ? <CallsView /> : view === 'analytics' ? <AnalyticsView /> : view === 'voices' ? <VoicesView /> : view === 'techspecs' ? <TechSpecsView /> : view === 'agents' ? <AgentsView /> : view === 'tools' ? <ToolsView /> : view === 'costing' ? <CostingView /> : view === 'kb' ? <KnowledgeBaseView /> : (
         <div className="flex-1 px-6 py-6 flex flex-col gap-4 min-w-0">
 
         {/* Page header + mode switcher */}
@@ -3376,9 +3631,26 @@ export default function GeminiPage() {
                     <span className={`w-2 h-2 rounded-full ${isConnected ? 'bg-green-500' : 'bg-muted-foreground/30'}`} />
                     <span className="text-muted-foreground">{isConnected ? 'Connected' : 'Disconnected'}</span>
                   </div>
-                  <div className={`flex items-center gap-1.5 text-xs font-semibold ${sm.color}`}>
-                    <span className={`w-2 h-2 rounded-full ${sm.dot}`} />
-                    {sm.label}
+                  <div className="flex items-center gap-3">
+                    {inCall && sentiment && <SentimentMeter sentiment={sentiment} />}
+                    {lastLatencyMs != null && (
+                      <span
+                        className={`flex items-center gap-1 text-[11px] font-semibold px-2 py-0.5 rounded-full border ${
+                          lastLatencyMs < 800
+                            ? 'bg-green-500/10 text-green-600 dark:text-green-400 border-green-500/20'
+                            : lastLatencyMs < 1500
+                            ? 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400 border-yellow-500/20'
+                            : 'bg-destructive/10 text-destructive border-destructive/20'
+                        }`}
+                        title="Time from end of your speech to the agent's first audio"
+                      >
+                        ⚡ {lastLatencyMs} ms
+                      </span>
+                    )}
+                    <div className={`flex items-center gap-1.5 text-xs font-semibold ${sm.color}`}>
+                      <span className={`w-2 h-2 rounded-full ${sm.dot}`} />
+                      {sm.label}
+                    </div>
                   </div>
                 </div>
 
@@ -3399,9 +3671,9 @@ export default function GeminiPage() {
                   </div>
                 )}
 
-                {/* Orb */}
+                {/* Avatar */}
                 <div className="flex-1 flex items-center justify-center">
-                  <AgentOrb inCall={inCall} status={status} />
+                  <GeminiAvatar inCall={inCall} status={status} analyserRef={playAnalyserRef} mood={inCall ? (sentiment?.label ?? null) : null} />
                 </div>
 
                 {/* Call button */}
@@ -3445,6 +3717,9 @@ export default function GeminiPage() {
                       <p className="text-xs text-muted-foreground/60 text-center py-2">Listening… start speaking</p>
                     )}
                     {transcript.map(entry => (
+                      entry.role === 'tool' ? (
+                        <ToolChip key={entry.id} name={entry.toolName} args={entry.toolArgs} status={entry.toolStatus} />
+                      ) : (
                       <div key={entry.id} className={`flex ${entry.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                         <div className={`max-w-[80%] px-3 py-2 rounded-xl text-xs leading-relaxed ${
                           entry.role === 'user'
@@ -3457,6 +3732,7 @@ export default function GeminiPage() {
                           {entry.text}
                         </div>
                       </div>
+                      )
                     ))}
                     <div ref={transcriptEndRef} />
                   </div>

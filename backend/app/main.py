@@ -93,6 +93,16 @@ async def _migrate_schema() -> None:
             "ALTER TABLE gemini_agents ADD COLUMN IF NOT EXISTS "
             "kb_collection_ids JSONB NOT NULL DEFAULT '[]'::jsonb"
         ))
+        # gemini_call_logs — post-call AI analysis fields (summary/sentiment/extraction).
+        await conn.execute(text(
+            "ALTER TABLE gemini_call_logs ADD COLUMN IF NOT EXISTS summary TEXT"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE gemini_call_logs ADD COLUMN IF NOT EXISTS sentiment VARCHAR(16)"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE gemini_call_logs ADD COLUMN IF NOT EXISTS extracted JSONB"
+        ))
 
 
 async def reconcile_seed_models(db) -> dict:
