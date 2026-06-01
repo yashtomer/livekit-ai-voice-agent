@@ -52,17 +52,6 @@ PHONE_LANGUAGE     = os.environ.get("PHONE_LANGUAGE", "en")
 VOBIZ_AUTH_ID      = os.environ.get("VOBIZ_AUTH_ID", "").strip()
 VOBIZ_AUTH_TOKEN   = os.environ.get("VOBIZ_AUTH_TOKEN", "").strip()
 VOBIZ_PHONE_NUMBER = os.environ.get("VOBIZ_PHONE_NUMBER", "").strip()
-# Local dev only: Vobiz (cloud) can't reach localhost/the container, so set
-# NGROK_URL to the public tunnel host. When unset (production), webhook/answer
-# URLs fall back to the inbound request host. The WS handler especially needs
-# this — `ws.url.hostname` there is the internal host, never the public one.
-NGROK_URL = os.environ.get("NGROK_URL", "").strip()
-
-
-def _public_host(fallback: str) -> str:
-    if NGROK_URL:
-        return NGROK_URL.replace("https://", "").replace("http://", "").rstrip("/")
-    return fallback
 
 MODEL = os.environ.get("GEMINI_LIVE_MODEL", "gemini-2.0-flash-live-001")
 API_VERSION = os.environ.get("GEMINI_API_VERSION", "v1beta")
@@ -185,7 +174,7 @@ async def make_outbound_call(
         "_ts":               datetime.utcnow().timestamp(),
     }
 
-    host = _public_host(request.url.hostname)
+    host = request.url.hostname
     url = f"https://api.vobiz.ai/api/v1/Account/{VOBIZ_AUTH_ID}/Call/"
     answer_url = f"https://{host}/api/vobiz/voice?cfg={cfg_id}"
     hangup_url = f"https://{host}/api/vobiz/status"
