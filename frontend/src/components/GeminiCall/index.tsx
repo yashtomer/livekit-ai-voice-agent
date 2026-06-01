@@ -1,6 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { Mic, MicOff, PhoneOff, Phone, Minimize2, Maximize2, X, ChevronDown } from 'lucide-react'
 import useGeminiVoice, { type GeminiStatus } from '../../hooks/useGeminiVoice'
+import GeminiAvatar from '../GeminiAvatar'
 
 interface GeminiCallProps {
   onClose: () => void
@@ -53,7 +54,7 @@ export default function GeminiCall({ onClose }: GeminiCallProps) {
   const [isMinimized, setIsMinimized] = useState(false)
   const transcriptEndRef = useRef<HTMLDivElement>(null)
 
-  const { status, inCall, transcript, startCall, hangUp, clearTranscript } = useGeminiVoice(systemPrompt, language)
+  const { status, inCall, transcript, sentiment, startCall, hangUp, clearTranscript, playAnalyserRef } = useGeminiVoice(systemPrompt, language)
 
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -151,41 +152,22 @@ export default function GeminiCall({ onClose }: GeminiCallProps) {
             </div>
           </div>
 
-          {/* Orb / waveform */}
-          <div className="flex items-center justify-center py-3 h-20">
-            {isActive ? (
-              <div className="flex items-end gap-0.5 h-12">
-                {Array.from({ length: 16 }).map((_, i) => (
-                  <div
-                    key={i}
-                    className="w-1 bg-primary rounded-full"
-                    style={{
-                      height: status === 'speaking'
-                        ? `${30 + Math.sin(i * 0.7) * 20 + 20}%`
-                        : status === 'listening'
-                        ? `${15 + Math.sin(i * 1.2) * 10 + 10}%`
-                        : '10%',
-                      animation: status === 'speaking' || status === 'listening'
-                        ? `voice-wave ${0.8 + i * 0.05}s ease-in-out infinite alternate`
-                        : 'none',
-                      opacity: 0.4 + (i / 16) * 0.6,
-                    }}
-                  />
-                ))}
-              </div>
-            ) : (
-              <div className={`w-14 h-14 rounded-full bg-gradient-to-br from-blue-500/20 to-purple-600/20 border-2 border-border flex items-center justify-center ${status === 'error' ? 'border-destructive/40' : ''}`}>
-                <div className="w-9 h-9 rounded-full bg-gradient-to-br from-blue-500 to-purple-600 flex items-center justify-center">
-                  <span className="text-lg font-black text-white">G</span>
-                </div>
-              </div>
-            )}
+          {/* Avatar */}
+          <div className="flex items-center justify-center py-1">
+            <GeminiAvatar inCall={inCall} status={status} analyserRef={playAnalyserRef} width={220} height={200} mood={inCall ? (sentiment?.label ?? null) : null} />
           </div>
 
           {/* Transcript */}
           {transcript.length > 0 && (
             <div className="mx-4 mb-2 bg-muted/30 border border-border rounded-xl p-2.5 max-h-36 overflow-y-auto space-y-1.5">
               {transcript.map(entry => (
+                entry.role === 'tool' ? (
+                  <div key={entry.id} className="flex justify-center">
+                    <div className="flex items-center gap-1 px-2 py-1 rounded-lg bg-amber-500/10 border border-amber-500/25 text-[10px] text-amber-700 dark:text-amber-300 font-mono">
+                      🔧 {entry.toolName}
+                    </div>
+                  </div>
+                ) : (
                 <div key={entry.id} className={`flex ${entry.role === 'user' ? 'justify-end' : 'justify-start'}`}>
                   <div className={`max-w-[85%] px-2.5 py-1.5 rounded-xl text-[11px] leading-relaxed ${
                     entry.role === 'user'
@@ -195,6 +177,7 @@ export default function GeminiCall({ onClose }: GeminiCallProps) {
                     {entry.text}
                   </div>
                 </div>
+                )
               ))}
               <div ref={transcriptEndRef} />
             </div>

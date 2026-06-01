@@ -328,7 +328,12 @@ Caller ◀─ μ-law 8kHz ─▶ Vobiz ◀──WS (playAudio / media events)─
 - Same tool dispatch, KB, ambient filler, and logging as the other paths.
 
 Required env: `VOBIZ_AUTH_ID`, `VOBIZ_AUTH_TOKEN`, `VOBIZ_PHONE_NUMBER`. The
-answer/hangup URLs are derived from the inbound request host (no `PUBLIC_HOST`).
+answer / stream / transfer URLs that Vobiz must reach are built from the public
+host: `VITE_BACKEND_URL` when set, otherwise the inbound request host. (Inside
+the WebSocket handler the socket's own host is the internal container address,
+so `VITE_BACKEND_URL` is what makes the webhook URLs externally reachable.)
+Optional: `HUMAN_AGENT_NUMBER` — default number the `transfer_call` tool hands
+off to (a per-call `transfer_number` on `/api/vobiz/call` overrides it).
 
 ---
 
@@ -376,6 +381,8 @@ Added round-trip latency is ~20–40 ms — inaudible in a voice call.
 | `KB_EMBED_MODEL` | embedding model (default `gemini-embedding-001`) |
 | `TWILIO_ACCOUNT_SID/API_KEY/API_SECRET/TWIML_APP_SID/PHONE_NUMBER` | Twilio |
 | `VOBIZ_AUTH_ID / VOBIZ_AUTH_TOKEN / VOBIZ_PHONE_NUMBER` | Vobiz |
+| `VITE_BACKEND_URL` | public backend host used to build Vobiz answer/stream/transfer webhook URLs (falls back to the request host) |
+| `HUMAN_AGENT_NUMBER` | default human-agent number for the `transfer_call` warm-transfer tool |
 | `PHONE_SYSTEM_PROMPT`, `PHONE_LANGUAGE` | inbound-phone fallback agent |
 
 **pgvector prerequisite:** the KB needs the `vector` extension on Postgres

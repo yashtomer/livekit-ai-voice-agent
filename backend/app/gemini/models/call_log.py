@@ -21,3 +21,11 @@ class GeminiCallLog(Base):
     started_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
     ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
     duration_s: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    # Post-call AI analysis (generated once at end_call from the transcript).
+    # summary       — 1–2 sentence recap of the call.
+    # sentiment     — overall caller sentiment: positive | neutral | negative.
+    # extracted     — structured fields pulled from the conversation (free-form
+    #                 key/value object, e.g. {patient_name, doctor, date, time}).
+    summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    sentiment: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
+    extracted: Mapped[Any] = mapped_column(JSON, nullable=True)

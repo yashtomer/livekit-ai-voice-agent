@@ -86,7 +86,7 @@ Host
 
 **Gemini × Twilio phone bridge flow:**
 1. Someone calls your Twilio phone number → Twilio hits `POST /twilio/voice` (TwiML webhook).
-2. Backend returns `<Connect><Stream url="wss://{PUBLIC_HOST}/twilio/stream" />` TwiML.
+2. Backend returns `<Connect><Stream url="wss://<backend-host>/twilio/stream" />` TwiML (host derived from `VITE_BACKEND_URL`, falling back to the request host).
 3. Twilio opens a Media Stream WebSocket to `/twilio/stream`; backend transcodes μ-law 8 kHz ↔ PCM16 16 kHz via `audioop` and streams to Gemini Live.
 4. For browser-to-phone dialling: browser calls `GET /twilio/token` to get a Twilio Voice SDK JWT, then uses the `@twilio/voice-sdk` `Device` to place a call.
 
@@ -299,8 +299,8 @@ TWILIO_API_KEY=SK...              # Twilio API Key SID (not account SID)
 TWILIO_API_SECRET=<api-key-secret>
 TWILIO_TWIML_APP_SID=AP...        # TwiML Application SID
 
-# Where the Twilio webhook can reach your backend
-PUBLIC_HOST=api.example.com       # hostname only, no https:// prefix
+# Public backend URL the Twilio/Vobiz webhooks can reach (scheme + host)
+VITE_BACKEND_URL=https://api.example.com
 
 # Optional — override the language Gemini responds in for phone calls
 PHONE_LANGUAGE=en                 # default: en
@@ -316,7 +316,7 @@ docker compose -f docker-compose-dev.yml up -d
 ngrok http 8000
 ```
 
-Note your ngrok URL, e.g. `https://abc123.ngrok.io`. Set `PUBLIC_HOST=abc123.ngrok.io` in `.env`.
+Note your ngrok URL, e.g. `https://abc123.ngrok.io`. Set `VITE_BACKEND_URL=https://abc123.ngrok.io` in `.env`.
 
 #### Step 2 — Configure Twilio
 
@@ -415,7 +415,7 @@ TWILIO_ACCOUNT_SID=AC...
 TWILIO_API_KEY=SK...          # Twilio API Key SID (not the Account SID)
 TWILIO_API_SECRET=            # Secret for the API Key above
 TWILIO_TWIML_APP_SID=AP...    # TwiML Application SID (voice request URL = /twilio/voice)
-PUBLIC_HOST=api.example.com   # Hostname only (no https://); used in the TwiML Stream URL
+VITE_BACKEND_URL=https://api.example.com   # Public backend URL; used to build the TwiML Stream URL
 PHONE_LANGUAGE=en             # Language for Gemini phone agent (default: en)
 ```
 
@@ -508,7 +508,7 @@ In Twilio Console → your phone number → **Voice & Fax**:
 | A call comes in | Webhook — `https://api.example.com/twilio/voice` (HTTP POST) |
 | TwiML App — Voice Request URL | `https://api.example.com/twilio/voice` (HTTP POST) |
 
-Set `PUBLIC_HOST=api.example.com` in `.env` so the TwiML `<Stream>` URL resolves correctly.
+Set `VITE_BACKEND_URL=https://api.example.com` in `.env` so the TwiML `<Stream>` URL resolves correctly.
 
 No extra firewall rules needed — only Apache (port 443) is exposed publicly.
 
@@ -664,6 +664,6 @@ livekit-ai-voice-agent/
 | Gemini: no audio heard / mic not working | Browser must be served over HTTPS (or localhost) for `getUserMedia` to work. If testing on a remote server without HTTPS, use ngrok or add a self-signed cert. |
 | Gemini barge-in / interruption not working | VAD config is already tuned (`START_SENSITIVITY_HIGH`, `silence_duration_ms=100`). If still sluggish, check your browser's mic sample rate — the worklet re-samples to 16 kHz internally. |
 | **Twilio: `/twilio/token` returns 500** | One or more Twilio env vars missing. Ensure `TWILIO_ACCOUNT_SID`, `TWILIO_API_KEY`, `TWILIO_API_SECRET`, and `TWILIO_TWIML_APP_SID` are all set in `.env` and the container was restarted after editing. |
-| Twilio call connects then drops immediately | Check that `PUBLIC_HOST` is set to your public hostname (no `https://` prefix) and that the TwiML App's **Voice Request URL** points to `https://<PUBLIC_HOST>/twilio/voice`. |
+| Twilio call connects then drops immediately | Check that `VITE_BACKEND_URL` is set to your public backend URL and that the TwiML App's **Voice Request URL** points to `<VITE_BACKEND_URL>/twilio/voice`. |
 | Twilio Media Stream connects but no Gemini audio | Confirm `GOOGLE_API_KEY` is set in `.env`. The phone bridge always uses the server key — it does not look up per-user keys. |
-| ngrok URL changed — Twilio webhook broken | Update the **Voice Request URL** in Twilio Console and the `PUBLIC_HOST` in `.env`, then restart the backend container (`docker compose restart backend`). |
+| ngrok URL changed — Twilio webhook broken | Update the **Voice Request URL** in Twilio Console and the `VITE_BACKEND_URL` in `.env`, then restart the backend container (`docker compose restart backend`). |

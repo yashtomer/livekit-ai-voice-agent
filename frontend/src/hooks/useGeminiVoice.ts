@@ -2,11 +2,22 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 export type GeminiStatus = 'idle' | 'connecting' | 'listening' | 'processing' | 'speaking' | 'error'
 export type GeminiErrorCode = 'no_api_key' | 'generic'
+export type SentimentLabel = 'positive' | 'neutral' | 'negative'
+
+export interface GeminiSentiment {
+  label: SentimentLabel
+  score: number       // -1 … 1
+  frustration: number // 0 … 1
+}
 
 export interface GeminiTranscriptEntry {
   id: number
-  role: 'user' | 'model'
+  role: 'user' | 'model' | 'tool'
   text: string
+  // Populated only when role === 'tool'.
+  toolName?: string
+  toolArgs?: Record<string, unknown>
+  toolStatus?: string | null
 }
 
 const RECORD_SAMPLE_RATE = 16000
@@ -54,11 +65,14 @@ export default function useGeminiVoice(
   const [isConnected, setIsConnected] = useState(false)
   const [transcript, setTranscript] = useState<GeminiTranscriptEntry[]>([])
   const [errorCode, setErrorCode] = useState<GeminiErrorCode | null>(null)
+  const [lastLatencyMs, setLastLatencyMs] = useState<number | null>(null)
+  const [sentiment, setSentiment] = useState<GeminiSentiment | null>(null)
 
   const wsRef = useRef<WebSocket | null>(null)
   const streamRef = useRef<MediaStream | null>(null)
   const recordCtxRef = useRef<AudioContext | null>(null)
   const playCtxRef = useRef<AudioContext | null>(null)
+  const playAnalyserRef = useRef<AnalyserNode | null>(null)
   const processorRef = useRef<AudioWorkletNode | null>(null)
   const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null)
   const nextPlayTimeRef = useRef(0)
@@ -95,6 +109,13 @@ export default function useGeminiVoice(
     })
   }
 
+  function appendToolEvent(name: string, args: Record<string, unknown>, toolStatus: string | null) {
+    setTranscript((prev: GeminiTranscriptEntry[]) => [
+      ...prev,
+      { role: 'tool' as const, text: '', toolName: name, toolArgs: args, toolStatus, id: ++transcriptIdRef.current },
+    ])
+  }
+
   function playAudioBuffer(arrayBuf: ArrayBuffer) {
     const ctx = playCtxRef.current
     if (!ctx) return
@@ -103,7 +124,7 @@ export default function useGeminiVoice(
     buf.copyToChannel(f32, 0)
     const src = ctx.createBufferSource()
     src.buffer = buf
-    src.connect(ctx.destination)
+    src.connect(playAnalyserRef.current ?? ctx.destination)
     const at = Math.max(ctx.currentTime, nextPlayTimeRef.current)
     src.start(at)
     nextPlayTimeRef.current = at + buf.duration
@@ -166,6 +187,23 @@ export default function useGeminiVoice(
       switch (msg.type) {
         case 'transcript':
           appendTranscript(msg.role as 'user' | 'model', msg.text as string)
+          break
+        case 'tool':
+          appendToolEvent(
+            msg.name as string,
+            (msg.args as Record<string, unknown>) || {},
+            (msg.status as string | null) ?? null,
+          )
+          break
+        case 'metric':
+          if (typeof msg.latency_ms === 'number') setLastLatencyMs(msg.latency_ms)
+          break
+        case 'sentiment':
+          setSentiment({
+            label: (msg.label as SentimentLabel) || 'neutral',
+            score: typeof msg.score === 'number' ? msg.score : 0,
+            frustration: typeof msg.frustration === 'number' ? msg.frustration : 0,
+          })
           break
         case 'status':
           if (inCallRef.current) setStatus(msg.state as GeminiStatus)
@@ -245,10 +283,19 @@ export default function useGeminiVoice(
       })
     }
     if (playCtxRef.current.state === 'suspended') await playCtxRef.current.resume()
+    if (!playAnalyserRef.current || playAnalyserRef.current.context !== playCtxRef.current) {
+      const analyser = playCtxRef.current.createAnalyser()
+      analyser.fftSize = 1024
+      analyser.smoothingTimeConstant = 0.6
+      analyser.connect(playCtxRef.current.destination)
+      playAnalyserRef.current = analyser
+    }
     nextPlayTimeRef.current = 0
   }
 
   const startCall = useCallback(async () => {
+    setLastLatencyMs(null)
+    setSentiment(null)
     await preWarmPlayback()
     connectWS(async () => {
       const ok = await startMicInternal()
@@ -268,6 +315,7 @@ export default function useGeminiVoice(
     setStatus('idle')
     wsRef.current?.close()
     wsRef.current = null
+    playAnalyserRef.current = null
     playCtxRef.current?.close().catch(() => {})
     playCtxRef.current = null
   }, [])
@@ -283,5 +331,5 @@ export default function useGeminiVoice(
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  return { status, inCall, isConnected, transcript, errorCode, startCall, hangUp, clearTranscript, clearError }
+  return { status, inCall, isConnected, transcript, errorCode, lastLatencyMs, sentiment, startCall, hangUp, clearTranscript, clearError, playAnalyserRef }
 }
