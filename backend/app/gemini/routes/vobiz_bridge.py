@@ -52,6 +52,20 @@ PHONE_LANGUAGE     = os.environ.get("PHONE_LANGUAGE", "en")
 VOBIZ_AUTH_ID      = os.environ.get("VOBIZ_AUTH_ID", "").strip()
 VOBIZ_AUTH_TOKEN   = os.environ.get("VOBIZ_AUTH_TOKEN", "").strip()
 VOBIZ_PHONE_NUMBER = os.environ.get("VOBIZ_PHONE_NUMBER", "").strip()
+# Public host Vobiz must reach for answer/stream/transfer webhooks. Inside the
+# WS handler the socket's own host is the internal container address, so we
+# derive the externally-reachable host from VITE_BACKEND_URL when it's set and
+# fall back to the inbound request host otherwise.
+VITE_BACKEND_URL   = os.environ.get("VITE_BACKEND_URL", "").strip()
+
+
+def _public_host(fallback: str) -> str:
+    if VITE_BACKEND_URL:
+        from urllib.parse import urlparse
+        netloc = urlparse(VITE_BACKEND_URL if "://" in VITE_BACKEND_URL else f"//{VITE_BACKEND_URL}").netloc
+        if netloc:
+            return netloc
+    return fallback
 
 MODEL = os.environ.get("GEMINI_LIVE_MODEL", "gemini-2.0-flash-live-001")
 API_VERSION = os.environ.get("GEMINI_API_VERSION", "v1beta")
