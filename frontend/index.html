@@ -9,6 +9,20 @@
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@300;400;500;600;700;800&display=swap" rel="stylesheet" />
+    <!--
+      Import map so the CDN-loaded TalkingHead module (see GeminiAvatar) can resolve
+      its bare `three` / `three/addons/` imports. TalkingHead@1.7 targets three@0.180.0.
+      This is isolated from the app's own bundled three (Vite rewrites those to file
+      URLs at build time, so this map never affects them).
+    -->
+    <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js/+esm",
+        "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/"
+      }
+    }
+    </script>
   </head>
   <body>
     <div id="root"></div>

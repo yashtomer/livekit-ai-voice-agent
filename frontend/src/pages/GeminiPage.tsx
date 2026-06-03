@@ -5,7 +5,7 @@ import { Device, Call } from '@twilio/voice-sdk'
 import { Phone, PhoneOff, Mic, MicOff, ChevronDown, Settings, Home, ListVideo, Eye, X, RefreshCw, Play, Loader2, Mic2, FileCode, ArrowRight, Globe, Cloud, Server, Cpu, PhoneCall, Wrench, Bot, Plus, Pencil, Trash2, Star, Lock, Webhook, FlaskConical, IndianRupee, Volume2, VolumeX, ArrowLeft, Music, BookOpen, FileText, Upload, Search, Database, BarChart3, Clock, TrendingUp, AlertTriangle } from 'lucide-react'
 import Layout from '../components/Layout'
 import useGeminiVoice, { type GeminiStatus } from '../hooks/useGeminiVoice'
-import GeminiAvatar from '../components/GeminiAvatar'
+import GeminiAvatar, { AVATARS, DEFAULT_AVATAR_URL, CAMERA_VIEWS, DEFAULT_CAMERA_VIEW, type CameraView } from '../components/GeminiAvatar'
 import { useUIStore } from '../store/uiStore'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -2685,17 +2685,22 @@ function CostingView() {
               <IndianRupee className="w-7 h-7" />
               {fmtInr(monthlyInr)}
             </span>
-            <span className="text-xs text-muted-foreground">per month</span>
+            <span className="text-xs text-muted-foreground">
+              per month
+              {usdToInr > 0 && <> · ≈ ${(monthlyInr / usdToInr).toLocaleString('en-US', { maximumFractionDigits: 2 })}</>}
+            </span>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
             <div className="bg-muted/40 border border-border rounded-lg p-3">
               <div className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground">Per day</div>
               <div className="text-lg font-bold text-foreground">₹{fmtInr(dailyInr)}</div>
+              {usdToInr > 0 && <div className="text-[11px] font-medium text-muted-foreground/70">≈ ${(dailyInr / usdToInr).toFixed(2)}</div>}
             </div>
             <div className="bg-muted/40 border border-border rounded-lg p-3">
               <div className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground">Per minute</div>
               <div className="text-lg font-bold text-foreground">₹{perMinInr.toFixed(2)}</div>
+              {usdToInr > 0 && <div className="text-[11px] font-medium text-muted-foreground/70">≈ ${(perMinInr / usdToInr).toFixed(3)}</div>}
             </div>
             <div className="bg-muted/40 border border-border rounded-lg p-3">
               <div className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground">Minutes / month</div>
@@ -2704,6 +2709,7 @@ function CostingView() {
             <div className="bg-muted/40 border border-border rounded-lg p-3">
               <div className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground">Gemini rate</div>
               <div className="text-lg font-bold text-foreground">₹{geminiInrPerMin.toFixed(2)} / min</div>
+              {usdToInr > 0 && <div className="text-[11px] font-medium text-muted-foreground/70">≈ ${(geminiInrPerMin / usdToInr).toFixed(3)} / min</div>}
             </div>
           </div>
 
@@ -3372,6 +3378,8 @@ export default function GeminiPage() {
   const [systemPrompt, setSystemPrompt] = useState(templates[0]?.prompt || '')
   const [muted, setMuted] = useState(false)
   const [voice, setVoice] = useState('Aoede')
+  const [avatarUrl, setAvatarUrl] = useState<string>(DEFAULT_AVATAR_URL)
+  const [cameraView, setCameraView] = useState<CameraView>(DEFAULT_CAMERA_VIEW)
   const [toolIds, setToolIds] = useState<number[]>(templates[0]?.tool_ids || [])
   const [kbCollectionIds, setKbCollectionIds] = useState<number[]>(templates[0]?.kb_collection_ids || [])
   const [ambientAlways, setAmbientAlways] = useState<string | null>(templates[0]?.ambient_always ?? null)
@@ -3381,7 +3389,7 @@ export default function GeminiPage() {
 
   const { openConfigModal } = useUIStore()
 
-  const { status, inCall, isConnected, transcript, errorCode, lastLatencyMs, sentiment, startCall, hangUp, clearTranscript, clearError, playAnalyserRef } =
+  const { status, inCall, isConnected, transcript, errorCode, lastLatencyMs, sentiment, startCall, hangUp, clearTranscript, clearError, audioSinkRef, audioInterruptRef } =
     useGeminiVoice(systemPrompt, language, voice, toolIds, ambientAlways, ambientToolCall, ambientVolume, kbCollectionIds)
 
   useEffect(() => {
@@ -3671,9 +3679,44 @@ export default function GeminiPage() {
                   </div>
                 )}
 
-                {/* Avatar */}
-                <div className="flex-1 flex items-center justify-center">
-                  <GeminiAvatar inCall={inCall} status={status} analyserRef={playAnalyserRef} mood={inCall ? (sentiment?.label ?? null) : null} />
+                {/* Avatar stage — controls float in the surrounding whitespace */}
+                <div className="relative flex-1 w-full flex items-center justify-center min-h-0">
+                  {/* Avatar picker — top-left */}
+                  <div className="absolute top-3 left-3 z-10 flex flex-col gap-1.5">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground/60 pl-1">Avatar</span>
+                    {AVATARS.map(a => (
+                      <button
+                        key={a.id}
+                        onClick={() => setAvatarUrl(a.url)}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold text-left transition-all border ${
+                          avatarUrl === a.url
+                            ? 'bg-primary text-primary-foreground border-primary shadow-sm'
+                            : 'bg-card/70 backdrop-blur text-foreground border-border hover:bg-muted'
+                        }`}
+                      >
+                        {a.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <GeminiAvatar inCall={inCall} status={status} audioSinkRef={audioSinkRef} audioInterruptRef={audioInterruptRef} avatarUrl={avatarUrl} cameraView={cameraView} width={340} height={460} mood={inCall ? (sentiment?.label ?? null) : null} />
+
+                  {/* Camera framing — bottom-center segmented control */}
+                  <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1 bg-card/70 backdrop-blur border border-border rounded-full p-1 shadow-sm">
+                    {CAMERA_VIEWS.map(v => (
+                      <button
+                        key={v.value}
+                        onClick={() => setCameraView(v.value)}
+                        className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${
+                          cameraView === v.value
+                            ? 'bg-primary text-primary-foreground shadow-sm'
+                            : 'text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        {v.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 {/* Call button */}
@@ -3713,6 +3756,18 @@ export default function GeminiPage() {
                 {/* Transcript */}
                 {(transcript.length > 0 || (inCall && transcript.length === 0)) && (
                   <div className="w-full mt-4 bg-muted/30 border border-border rounded-xl p-3 max-h-44 overflow-y-auto space-y-2">
+                    {transcript.length > 0 && (
+                      <div className="flex items-center justify-between sticky -top-3 -mx-3 -mt-3 px-3 pt-2.5 pb-1.5 mb-1 bg-muted/95 backdrop-blur z-10 border-b border-border">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground/60">Transcript</span>
+                        <button
+                          onClick={clearTranscript}
+                          className="flex items-center gap-1 text-[11px] font-semibold text-muted-foreground hover:text-destructive transition-colors"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          Clear
+                        </button>
+                      </div>
+                    )}
                     {inCall && transcript.length === 0 && (
                       <p className="text-xs text-muted-foreground/60 text-center py-2">Listening… start speaking</p>
                     )}

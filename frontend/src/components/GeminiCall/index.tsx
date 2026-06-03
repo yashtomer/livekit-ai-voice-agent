@@ -1,7 +1,7 @@
 import { useState, useEffect, useRef } from 'react'
 import { Mic, MicOff, PhoneOff, Phone, Minimize2, Maximize2, X, ChevronDown } from 'lucide-react'
 import useGeminiVoice, { type GeminiStatus } from '../../hooks/useGeminiVoice'
-import GeminiAvatar from '../GeminiAvatar'
+import GeminiAvatar, { AVATARS, DEFAULT_AVATAR_URL, CAMERA_VIEWS, DEFAULT_CAMERA_VIEW, type CameraView } from '../GeminiAvatar'
 
 interface GeminiCallProps {
   onClose: () => void
@@ -52,9 +52,11 @@ export default function GeminiCall({ onClose }: GeminiCallProps) {
   const [systemPrompt, setSystemPrompt] = useState(TEMPLATES[0].prompt)
   const [isMuted, setIsMuted] = useState(false)
   const [isMinimized, setIsMinimized] = useState(false)
+  const [avatarUrl, setAvatarUrl] = useState<string>(DEFAULT_AVATAR_URL)
+  const [cameraView, setCameraView] = useState<CameraView>(DEFAULT_CAMERA_VIEW)
   const transcriptEndRef = useRef<HTMLDivElement>(null)
 
-  const { status, inCall, transcript, sentiment, startCall, hangUp, clearTranscript, playAnalyserRef } = useGeminiVoice(systemPrompt, language)
+  const { status, inCall, transcript, sentiment, startCall, hangUp, clearTranscript, audioSinkRef, audioInterruptRef } = useGeminiVoice(systemPrompt, language)
 
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -144,6 +146,30 @@ export default function GeminiCall({ onClose }: GeminiCallProps) {
             </div>
           </div>
 
+          {/* Avatar + camera pickers — can switch live, even mid-call */}
+          <div className="px-4 pb-2 flex gap-2">
+            <div className="relative flex-1">
+              <select
+                value={avatarUrl}
+                onChange={e => setAvatarUrl(e.target.value)}
+                className="w-full appearance-none bg-background border border-border rounded-lg px-2.5 py-1.5 text-xs text-foreground pr-6 focus:outline-none focus:border-primary"
+              >
+                {AVATARS.map(a => <option key={a.id} value={a.url}>Avatar: {a.label}</option>)}
+              </select>
+              <ChevronDown className="absolute right-1.5 top-1/2 -translate-y-1/2 w-3 h-3 text-muted-foreground pointer-events-none" />
+            </div>
+            <div className="relative flex-1">
+              <select
+                value={cameraView}
+                onChange={e => setCameraView(e.target.value as CameraView)}
+                className="w-full appearance-none bg-background border border-border rounded-lg px-2.5 py-1.5 text-xs text-foreground pr-6 focus:outline-none focus:border-primary"
+              >
+                {CAMERA_VIEWS.map(v => <option key={v.value} value={v.value}>View: {v.label}</option>)}
+              </select>
+              <ChevronDown className="absolute right-1.5 top-1/2 -translate-y-1/2 w-3 h-3 text-muted-foreground pointer-events-none" />
+            </div>
+          </div>
+
           {/* Status bar */}
           <div className="px-4 pb-2">
             <div className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-semibold w-fit ${sc.color}`}>
@@ -154,7 +180,7 @@ export default function GeminiCall({ onClose }: GeminiCallProps) {
 
           {/* Avatar */}
           <div className="flex items-center justify-center py-1">
-            <GeminiAvatar inCall={inCall} status={status} analyserRef={playAnalyserRef} width={220} height={200} mood={inCall ? (sentiment?.label ?? null) : null} />
+            <GeminiAvatar inCall={inCall} status={status} audioSinkRef={audioSinkRef} audioInterruptRef={audioInterruptRef} avatarUrl={avatarUrl} cameraView={cameraView} width={220} height={200} mood={inCall ? (sentiment?.label ?? null) : null} />
           </div>
 
           {/* Transcript */}

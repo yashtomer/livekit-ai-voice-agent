@@ -73,6 +73,12 @@ export default function useGeminiVoice(
   const recordCtxRef = useRef<AudioContext | null>(null)
   const playCtxRef = useRef<AudioContext | null>(null)
   const playAnalyserRef = useRef<AnalyserNode | null>(null)
+  // When an external consumer (the TalkingHead avatar) wants to OWN audio playback
+  // for lip-sync, it sets audioSinkRef to a function that receives the raw PCM
+  // chunks, and audioInterruptRef to a flush callback used on barge-in / hang-up.
+  // When unset, playback falls back to the built-in scheduler below.
+  const audioSinkRef = useRef<((buf: ArrayBuffer) => void) | null>(null)
+  const audioInterruptRef = useRef<(() => void) | null>(null)
   const processorRef = useRef<AudioWorkletNode | null>(null)
   const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null)
   const nextPlayTimeRef = useRef(0)
@@ -117,6 +123,12 @@ export default function useGeminiVoice(
   }
 
   function playAudioBuffer(arrayBuf: ArrayBuffer) {
+    // If an external sink owns playback (e.g. the TalkingHead avatar lip-syncs it),
+    // hand off the raw 16-bit PCM and skip the built-in scheduler.
+    if (audioSinkRef.current) {
+      audioSinkRef.current(arrayBuf)
+      return
+    }
     const ctx = playCtxRef.current
     if (!ctx) return
     const f32 = int16ToFloat32(arrayBuf)
@@ -139,6 +151,8 @@ export default function useGeminiVoice(
     scheduledSourcesRef.current.forEach(s => { try { s.stop() } catch { /* noop */ } })
     scheduledSourcesRef.current = []
     nextPlayTimeRef.current = 0
+    // Flush an external playback sink (TalkingHead barge-in) if one is attached.
+    audioInterruptRef.current?.()
   }
 
   function connectWS(onOpenCb: () => void) {
@@ -331,5 +345,5 @@ export default function useGeminiVoice(
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  return { status, inCall, isConnected, transcript, errorCode, lastLatencyMs, sentiment, startCall, hangUp, clearTranscript, clearError, playAnalyserRef }
+  return { status, inCall, isConnected, transcript, errorCode, lastLatencyMs, sentiment, startCall, hangUp, clearTranscript, clearError, playAnalyserRef, audioSinkRef, audioInterruptRef }
 }
