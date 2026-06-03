@@ -129,15 +129,15 @@ function UltravoxCallPanel() {
         }
       })
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      session.addEventListener('error', (event: any) => {
-        setError(`Connection Error: ${event?.message || 'Check your internet or Ultravox balance.'}`)
+      session.addEventListener('error', (event: Event) => {
+        const message = (event as { message?: string }).message
+        setError(`Connection Error: ${message || 'Check your internet or Ultravox balance.'}`)
       })
 
       await session.joinCall(data.joinUrl)
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    } catch (err: any) {
-      const msg = err?.response?.data?.error || err?.message || 'Failed to start call'
+    } catch (err: unknown) {
+      const e = err as { response?: { data?: { error?: string } }; message?: string }
+      const msg = e.response?.data?.error || e.message || 'Failed to start call'
       setError(String(msg).includes('402') ? 'Ultravox balance empty. Please top up.' : msg)
       setStatus(UltravoxSessionStatus.DISCONNECTED)
       setStoreStatus('error')
@@ -160,8 +160,7 @@ function UltravoxCallPanel() {
     const next = !isMuted
     setIsMuted(next)
     // ultravox-client exposes muteMic/unmuteMic; guard in case of SDK version drift.
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const s = session as any
+    const s = session as { muteMic?: () => void; unmuteMic?: () => void }
     try { next ? s.muteMic?.() : s.unmuteMic?.() } catch { /* noop */ }
   }
 
