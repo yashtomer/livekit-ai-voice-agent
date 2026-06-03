@@ -1,4 +1,5 @@
 import { useEffect, useState, useRef } from 'react'
+import { Link } from 'react-router-dom'
 import { useQuery } from '@tanstack/react-query'
 import { Loader, AlertCircle, TrendingUp, ChevronRight, ChevronDown, Check, Lock, Phone, SlidersHorizontal } from 'lucide-react'
 import Layout from '../components/Layout'
@@ -6,7 +7,6 @@ import CostEstimator from '../components/CostEstimator'
 import CallInterface from '../components/CallInterface'
 import TranscriptPanel from '../components/TranscriptPanel'
 import MetricsPanel from '../components/MetricsPanel'
-import UltravoxCall from '../components/UltravoxCall'
 import { useModelStore, ModelOption, DEFAULT_LLM_PARAMS, DEFAULT_TTS_PARAMS } from '../store/modelStore'
 import api from '../api/client'
 
@@ -347,7 +347,6 @@ function ModelSelect({
 export default function Dashboard() {
   const { setModels, selectedStt, selectedLlm, selectedTts, setSelectedStt, setSelectedLlm, setSelectedTts, models } =
     useModelStore()
-  const [showUltravox, setShowUltravox] = useState(false)
 
   const { data: fxData } = useQuery({
     queryKey: ['fx-rate'],
@@ -496,12 +495,12 @@ export default function Dashboard() {
                   <p className="text-xs text-muted-foreground text-center leading-relaxed mb-2">
                     Call this number on WhatsApp to connect with our Ultravox Healthcare agent directly.
                   </p>
-                  <button 
-                    onClick={() => setShowUltravox(true)}
+                  <Link
+                    to="/ultravox"
                     className="flex-1 flex items-center justify-center gap-2 btn-primary py-2.5 text-base"
                   >
                     <Phone className="w-4 h-4" /> Start Web Call
-                  </button>
+                  </Link>
                 </div>
               </div>
             </div>
@@ -513,9 +512,6 @@ export default function Dashboard() {
           </div>
         )}
       </div>
-      {showUltravox && (
-        <UltravoxCall onClose={() => setShowUltravox(false)} />
-      )}
     </Layout>
   )
 }

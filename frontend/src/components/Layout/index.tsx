@@ -7,7 +7,6 @@ import { useAuthStore } from '../../store/authStore'
 import { useUIStore } from '../../store/uiStore'
 import { useTheme } from '../../lib/theme'
 import ConfigModal from '../ConfigModal'
-import UltravoxCall from '../UltravoxCall'
 
 interface LayoutProps {
   children: React.ReactNode
@@ -25,7 +24,6 @@ export default function Layout({ children }: LayoutProps) {
     closeConfigModal,
   } = useUIStore()
   const [showUserMenu, setShowUserMenu] = useState(false)
-  const [isUltravoxCallOpen, setIsUltravoxCallOpen] = useState(false)
 
   const handleLogout = () => {
     logout()
@@ -69,13 +67,17 @@ export default function Layout({ children }: LayoutProps) {
                 <span className="hidden sm:block">{label}</span>
               </Link>
             ))}
-            <button
-              onClick={() => setIsUltravoxCallOpen(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium text-muted-foreground hover:text-foreground hover:bg-muted transition-all"
+            <Link
+              to="/ultravox"
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
+                location.pathname === '/ultravox'
+                  ? 'bg-primary text-primary-foreground shadow-sm'
+                  : 'text-muted-foreground hover:text-foreground hover:bg-muted'
+              }`}
             >
               <Phone className="w-3.5 h-3.5" />
               <span className="hidden sm:block">Ultravox</span>
-            </button>
+            </Link>
             <Link
               to="/gemini"
               className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all ${
@@ -165,10 +167,6 @@ export default function Layout({ children }: LayoutProps) {
           onClose={closeConfigModal}
           highlightProvider={configModalHighlightProvider}
         />
-      )}
-
-      {isUltravoxCallOpen && (
-        <UltravoxCall onClose={() => setIsUltravoxCallOpen(false)} />
       )}
 
     </div>
