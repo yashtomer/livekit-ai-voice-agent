@@ -1,4 +1,4 @@
-import { useEffect, useRef, type RefObject } from 'react'
+import { useEffect, useRef, type MutableRefObject } from 'react'
 import type { GeminiStatus } from '../../hooks/useGeminiVoice'
 
 /**
@@ -145,9 +145,9 @@ interface GeminiAvatarProps {
   inCall: boolean
   status: GeminiStatus
   /** TalkingHead attaches here to receive raw PCM chunks and own playback. */
-  audioSinkRef: RefObject<((buf: ArrayBuffer) => void) | null>
+  audioSinkRef: MutableRefObject<((buf: ArrayBuffer) => void) | null>
   /** TalkingHead attaches here to flush audio on barge-in / hang-up. */
-  audioInterruptRef: RefObject<(() => void) | null>
+  audioInterruptRef: MutableRefObject<(() => void) | null>
   /** Local GLB URL of the avatar to show (see AVATARS). Swaps live when changed. */
   avatarUrl?: string
   /** Camera framing (see CAMERA_VIEWS). Re-frames live when changed. */
@@ -177,7 +177,7 @@ export default function GeminiAvatar({
   const inCallRef = useRef(inCall)
   const rafRef = useRef<number | null>(null)
   const smoothed = useRef(0)
-  const freqBuf = useRef<Uint8Array | null>(null)
+  const freqBuf = useRef<Uint8Array<ArrayBuffer> | null>(null)
   // PCM chunks that arrive before streamStart() has finished initialising.
   const pendingRef = useRef<ArrayBuffer[]>([])
   // Currently-shown avatar URL + a flag set while a swap is loading (so the lip
