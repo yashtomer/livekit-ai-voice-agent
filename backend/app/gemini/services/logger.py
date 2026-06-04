@@ -72,11 +72,13 @@ async def add_transcript(call_id: Optional[int], role: str, text: str) -> None:
         log.exception("gemini_logger.add_transcript failed")
 
 
-async def add_tool_event(call_id: Optional[int], name: str, args: dict, result: Any) -> None:
+async def add_tool_event(call_id: Optional[int], name: str, args: dict, result: Any,
+                          request: Optional[dict] = None) -> None:
     """Record a tool/function call in the transcript timeline (role='tool').
 
     Stored inline with the conversation so the call history can show what the
-    agent looked up and what it got back, in order.
+    agent looked up and what it got back, in order. `request` carries the actual
+    outgoing call metadata (kind/method/url/payload) for display.
     """
     if not call_id or not name:
         return
@@ -98,6 +100,7 @@ async def add_tool_event(call_id: Optional[int], name: str, args: dict, result: 
                 "role": "tool",
                 "name": name,
                 "args": args or {},
+                "request": request or None,
                 "result": preview,
                 "ts": datetime.utcnow().isoformat() + "Z",
             })

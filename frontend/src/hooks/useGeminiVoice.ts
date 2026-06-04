@@ -18,6 +18,8 @@ export interface GeminiTranscriptEntry {
   toolName?: string
   toolArgs?: Record<string, unknown>
   toolStatus?: string | null
+  toolResult?: unknown
+  toolRequest?: { kind?: string; method?: string; url?: string; payload?: unknown } | null
 }
 
 const RECORD_SAMPLE_RATE = 16000
@@ -59,6 +61,7 @@ export default function useGeminiVoice(
   ambientToolCall: string | null = null,
   ambientVolume = 0.15,
   kbCollectionIds: number[] = [],
+  firstMessage = '',
 ) {
   const [status, setStatus] = useState<GeminiStatus>('idle')
   const [inCall, setInCall] = useState(false)
@@ -73,6 +76,12 @@ export default function useGeminiVoice(
   const recordCtxRef = useRef<AudioContext | null>(null)
   const playCtxRef = useRef<AudioContext | null>(null)
   const playAnalyserRef = useRef<AnalyserNode | null>(null)
+  // When an external consumer (the TalkingHead avatar) wants to OWN audio playback
+  // for lip-sync, it sets audioSinkRef to a function that receives the raw PCM
+  // chunks, and audioInterruptRef to a flush callback used on barge-in / hang-up.
+  // When unset, playback falls back to the built-in scheduler below.
+  const audioSinkRef = useRef<((buf: ArrayBuffer) => void) | null>(null)
+  const audioInterruptRef = useRef<(() => void) | null>(null)
   const processorRef = useRef<AudioWorkletNode | null>(null)
   const sourceNodeRef = useRef<MediaStreamAudioSourceNode | null>(null)
   const nextPlayTimeRef = useRef(0)
@@ -87,7 +96,9 @@ export default function useGeminiVoice(
   const ambientToolCallRef = useRef(ambientToolCall)
   const ambientVolumeRef = useRef(ambientVolume)
   const kbCollectionIdsRef = useRef(kbCollectionIds)
+  const firstMessageRef = useRef(firstMessage)
 
+  useEffect(() => { firstMessageRef.current = firstMessage }, [firstMessage])
   useEffect(() => { systemPromptRef.current = systemPrompt }, [systemPrompt])
   useEffect(() => { languageRef.current = language }, [language])
   useEffect(() => { voiceRef.current = voice }, [voice])
@@ -109,14 +120,20 @@ export default function useGeminiVoice(
     })
   }
 
-  function appendToolEvent(name: string, args: Record<string, unknown>, toolStatus: string | null) {
+  function appendToolEvent(name: string, args: Record<string, unknown>, toolStatus: string | null, toolResult?: unknown, toolRequest?: GeminiTranscriptEntry['toolRequest']) {
     setTranscript((prev: GeminiTranscriptEntry[]) => [
       ...prev,
-      { role: 'tool' as const, text: '', toolName: name, toolArgs: args, toolStatus, id: ++transcriptIdRef.current },
+      { role: 'tool' as const, text: '', toolName: name, toolArgs: args, toolStatus, toolResult, toolRequest, id: ++transcriptIdRef.current },
     ])
   }
 
   function playAudioBuffer(arrayBuf: ArrayBuffer) {
+    // If an external sink owns playback (e.g. the TalkingHead avatar lip-syncs it),
+    // hand off the raw 16-bit PCM and skip the built-in scheduler.
+    if (audioSinkRef.current) {
+      audioSinkRef.current(arrayBuf)
+      return
+    }
     const ctx = playCtxRef.current
     if (!ctx) return
     const f32 = int16ToFloat32(arrayBuf)
@@ -139,6 +156,8 @@ export default function useGeminiVoice(
     scheduledSourcesRef.current.forEach(s => { try { s.stop() } catch { /* noop */ } })
     scheduledSourcesRef.current = []
     nextPlayTimeRef.current = 0
+    // Flush an external playback sink (TalkingHead barge-in) if one is attached.
+    audioInterruptRef.current?.()
   }
 
   function connectWS(onOpenCb: () => void) {
@@ -156,6 +175,7 @@ export default function useGeminiVoice(
       ws.send(JSON.stringify({
         type: 'config',
         system_prompt: systemPromptRef.current,
+        first_message: firstMessageRef.current,
         language: languageRef.current,
         voice: voiceRef.current,
         tool_ids: toolIdsRef.current,
@@ -193,6 +213,8 @@ export default function useGeminiVoice(
             msg.name as string,
             (msg.args as Record<string, unknown>) || {},
             (msg.status as string | null) ?? null,
+            msg.result,
+            (msg.request as GeminiTranscriptEntry['toolRequest']) ?? null,
           )
           break
         case 'metric':
@@ -331,5 +353,5 @@ export default function useGeminiVoice(
     }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
-  return { status, inCall, isConnected, transcript, errorCode, lastLatencyMs, sentiment, startCall, hangUp, clearTranscript, clearError, playAnalyserRef }
+  return { status, inCall, isConnected, transcript, errorCode, lastLatencyMs, sentiment, startCall, hangUp, clearTranscript, clearError, playAnalyserRef, audioSinkRef, audioInterruptRef }
 }

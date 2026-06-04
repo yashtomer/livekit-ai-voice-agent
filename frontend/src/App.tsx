@@ -4,6 +4,7 @@ import Login from './pages/Login'
 import Dashboard from './pages/Dashboard'
 import Admin from './pages/Admin'
 import GeminiPage from './pages/GeminiPage'
+import UltravoxPage from './pages/UltravoxPage'
 
 function PrivateRoute({ children }: { children: React.ReactNode }) {
   const isAuth = useAuthStore((s) => s.isAuthenticated())
@@ -43,6 +44,14 @@ export default function App() {
           element={
             <PrivateRoute>
               <GeminiPage />
+            </PrivateRoute>
+          }
+        />
+        <Route
+          path="/ultravox"
+          element={
+            <PrivateRoute>
+              <UltravoxPage />
             </PrivateRoute>
           }
         />

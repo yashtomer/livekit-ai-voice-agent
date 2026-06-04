@@ -2,10 +2,10 @@ import { useState, useEffect, useRef, useCallback, type ComponentType, type Reac
 import { useQuery } from '@tanstack/react-query'
 import api from '../api/client'
 import { Device, Call } from '@twilio/voice-sdk'
-import { Phone, PhoneOff, Mic, MicOff, ChevronDown, Settings, Home, ListVideo, Eye, X, RefreshCw, Play, Loader2, Mic2, FileCode, ArrowRight, Globe, Cloud, Server, Cpu, PhoneCall, Wrench, Bot, Plus, Pencil, Trash2, Star, Lock, Webhook, FlaskConical, IndianRupee, Volume2, VolumeX, ArrowLeft, Music, BookOpen, FileText, Upload, Search, Database, BarChart3, Clock, TrendingUp, AlertTriangle } from 'lucide-react'
+import { Phone, PhoneOff, Mic, MicOff, ChevronDown, Settings, Home, ListVideo, Eye, X, RefreshCw, Play, Loader2, Mic2, FileCode, ArrowRight, Globe, Cloud, Server, Cpu, PhoneCall, Wrench, Bot, Plus, Pencil, Trash2, Star, Lock, Webhook, FlaskConical, IndianRupee, Volume2, VolumeX, ArrowLeft, Music, BookOpen, FileText, Upload, Search, Database, BarChart3, Clock, TrendingUp, AlertTriangle, Sparkles, Variable, Braces, Info } from 'lucide-react'
 import Layout from '../components/Layout'
 import useGeminiVoice, { type GeminiStatus } from '../hooks/useGeminiVoice'
-import GeminiAvatar from '../components/GeminiAvatar'
+import GeminiAvatar, { AVATARS, DEFAULT_AVATAR_URL, CAMERA_VIEWS, DEFAULT_CAMERA_VIEW, type CameraView } from '../components/GeminiAvatar'
 import { useUIStore } from '../store/uiStore'
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
@@ -37,31 +37,103 @@ function formatDuration(s: number | null): string {
   return `${m}m ${r}s`
 }
 
-/** Inline timeline chip for a tool/function call made by the agent. */
-function ToolChip({ name, args, status, result }: {
+/** Inline timeline card for a tool/function call made by the agent.
+ *  Shows the request args and (collapsible) the response the tool returned. */
+function ToolChip({ name, args, status, result, request }: {
   name?: string
   args?: Record<string, unknown> | null
   status?: string | null
   result?: unknown
+  request?: { kind?: string; method?: string; url?: string; payload?: unknown } | null
 }) {
-  const argStr = args && Object.keys(args).length
-    ? Object.entries(args).map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : String(v)}`).join(', ')
-    : ''
-  const ok = status == null || status === 'ok'
+  // The actual payload sent to the endpoint (after constant/dynamic-variable
+  // substitution) — falls back to the raw LLM args when no request meta exists.
+  const payload = request?.payload != null ? request.payload : (args && Object.keys(args).length ? args : null)
+  const payloadStr = payload == null ? ''
+    : typeof payload === 'string' ? payload : JSON.stringify(payload, null, 2)
+  const url = request?.url
+  const method = request?.method
+  const resultStr = result == null ? ''
+    : typeof result === 'string' ? result : JSON.stringify(result, null, 2)
+  // Derive status from the result payload if it wasn't passed explicitly.
+  const derived = status ?? (result && typeof result === 'object' && 'status' in (result as Record<string, unknown>)
+    ? String((result as Record<string, unknown>).status) : null)
+  const isError = derived === 'error' || derived === 'unavailable'
+  const ok = derived == null || derived === 'ok'
+  const big = resultStr.length > 160 || resultStr.includes('\n') || payloadStr.length > 120
+  const [open, setOpen] = useState(!big)
+  const hasDetail = !!(payloadStr || resultStr)
+
+  const pill = `text-[9px] font-bold uppercase tracking-wide rounded-full px-1.5 py-0.5 leading-none ${
+    isError ? 'bg-destructive/15 text-destructive'
+      : ok ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+      : 'bg-amber-500/15 text-amber-600 dark:text-amber-400'}`
+
   return (
-    <div className="flex justify-center my-1">
-      <div className="max-w-[90%] flex items-start gap-2 px-2.5 py-1.5 rounded-lg bg-amber-500/10 border border-amber-500/25 text-[11px] text-amber-700 dark:text-amber-300">
-        <Wrench className="w-3 h-3 mt-0.5 flex-shrink-0" />
-        <div className="min-w-0">
-          <span className="font-semibold font-mono">{name || 'tool'}</span>
-          {argStr && <span className="opacity-70"> ({argStr})</span>}
-          {status && !ok && <span className="ml-1 font-semibold text-destructive">· {status}</span>}
-          {result != null && (
-            <span className="block opacity-60 mt-0.5 break-all">
-              → {typeof result === 'string' ? result.slice(0, 200) : JSON.stringify(result).slice(0, 200)}
-            </span>
+    <div className="flex justify-center my-1.5">
+      <div className="w-[92%] max-w-xl rounded-xl border border-border bg-muted/40 overflow-hidden shadow-sm">
+        <button
+          onClick={() => setOpen(o => !o)}
+          className="w-full flex items-center gap-2 px-3 py-2 text-left hover:bg-muted/70 transition-colors"
+        >
+          <span className="w-5 h-5 rounded-md bg-background border border-border flex items-center justify-center flex-shrink-0">
+            <Wrench className="w-3 h-3 text-muted-foreground" />
+          </span>
+          <span className="text-[10px] font-bold uppercase tracking-wide text-muted-foreground flex-shrink-0">Tool</span>
+          <span className="text-xs font-mono font-semibold text-foreground truncate">{name || 'tool'}</span>
+          <span className={pill}>{derived || 'called'}</span>
+          {hasDetail && (
+            <ChevronDown className={`w-4 h-4 ml-auto text-muted-foreground transition-transform flex-shrink-0 ${open ? 'rotate-180' : ''}`} />
           )}
-        </div>
+        </button>
+
+        {/* Endpoint hit — method + URL (HTTP tools only). Always visible. */}
+        {url && (
+          <div className="px-3 pb-2 flex items-center gap-1.5 min-w-0">
+            {method && (
+              <span className="text-[9px] font-bold rounded px-1.5 py-0.5 bg-primary/10 text-primary flex-shrink-0">{method}</span>
+            )}
+            <code className="text-[11px] font-mono text-foreground/70 truncate" title={url}>{url}</code>
+          </div>
+        )}
+
+        {open && hasDetail && (
+          <div className="border-t border-border bg-background/50 divide-y divide-border">
+            {payloadStr && (
+              <div className="px-3 py-2">
+                <span className="text-[9px] font-bold uppercase tracking-wide text-muted-foreground/70">Payload</span>
+                <pre className="mt-1 text-[11px] font-mono leading-relaxed whitespace-pre-wrap break-words text-foreground/90 max-h-44 overflow-auto">{payloadStr}</pre>
+              </div>
+            )}
+            {resultStr && (
+              <div className="px-3 py-2">
+                <span className="text-[9px] font-bold uppercase tracking-wide text-muted-foreground/70">Response</span>
+                <pre className="mt-1 text-[11px] font-mono leading-relaxed whitespace-pre-wrap break-words text-foreground/90 max-h-60 overflow-auto">{resultStr}</pre>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
+/** A single chat message bubble (user = red/primary, model = grey). */
+function ChatBubble({ role, text }: { role: 'user' | 'model'; text: string }) {
+  const isUser = role === 'user'
+  return (
+    <div className={`flex gap-2 ${isUser ? 'flex-row-reverse' : ''}`}>
+      <div className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center ${
+        isUser ? 'bg-primary text-primary-foreground' : 'bg-muted border border-border text-muted-foreground'
+      }`}>
+        {isUser ? <Mic className="w-3.5 h-3.5" /> : <Bot className="w-3.5 h-3.5" />}
+      </div>
+      <div className={`w-[80%] min-w-0 px-3.5 py-2 rounded-2xl text-sm leading-relaxed shadow-sm break-words ${
+        isUser
+          ? 'bg-primary text-primary-foreground rounded-tr-sm'
+          : 'bg-muted border border-border text-foreground rounded-tl-sm'
+      }`}>
+        {text}
       </div>
     </div>
   )
@@ -92,7 +164,7 @@ function SentimentMeter({ sentiment }: { sentiment: { label: string; score: numb
 }
 
 type AgentTemplate = {
-  label: string; prompt: string; voice?: string; language?: string; tool_ids?: number[]
+  label: string; prompt: string; first_message?: string | null; voice?: string; language?: string; tool_ids?: number[]
   kb_collection_ids?: number[]
   ambient_always?: string | null; ambient_tool_call?: string | null; ambient_volume?: number
 }
@@ -108,7 +180,7 @@ function useAgentTemplates(fallback: AgentTemplate[]): AgentTemplate[] {
       .then(body => {
         if (cancelled || !body) return
         const mapped: AgentTemplate[] = (body.items || []).map((a: Agent) => ({
-          label: a.name, prompt: a.system_prompt, voice: a.voice, language: a.language,
+          label: a.name, prompt: a.system_prompt, first_message: a.first_message, voice: a.voice, language: a.language,
           tool_ids: a.tool_ids || [],
           kb_collection_ids: a.kb_collection_ids || [],
           ambient_always: a.ambient_always, ambient_tool_call: a.ambient_tool_call,
@@ -499,6 +571,7 @@ function OutboundDialer() {
   const [phone, setPhone] = useState('')
   const [templateIdx, setTemplateIdx] = useState(0)
   const [systemPrompt, setSystemPrompt] = useState(templates[0]?.prompt || '')
+  const [firstMessage, setFirstMessage] = useState(templates[0]?.first_message || '')
   const [language, setLanguage] = useState(templates[0]?.language || 'en')
   const [voice, setVoice] = useState(templates[0]?.voice || 'Aoede')
   const [toolIds, setToolIds] = useState<number[]>(templates[0]?.tool_ids || [])
@@ -521,6 +594,7 @@ function OutboundDialer() {
     const t = templates[idx]
     if (t) {
       setSystemPrompt(t.prompt)
+      setFirstMessage(t.first_message || '')
       if (t.voice) setVoice(t.voice)
       if (t.language) setLanguage(t.language)
       setToolIds(t.tool_ids || [])
@@ -558,7 +632,7 @@ function OutboundDialer() {
           ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
         body: JSON.stringify({
-          to, system_prompt: systemPrompt, language, voice, tool_ids: toolIds,
+          to, system_prompt: systemPrompt, first_message: firstMessage, language, voice, tool_ids: toolIds,
           kb_collection_ids: kbCollectionIds,
           ambient_always: ambientAlways, ambient_tool_call: ambientToolCall, ambient_volume: ambientVolume,
         }),
@@ -716,7 +790,9 @@ type TranscriptItem = {
   // tool events
   name?: string
   args?: Record<string, unknown>
+  status?: string | null
   result?: unknown
+  request?: { kind?: string; method?: string; url?: string; payload?: unknown } | null
 }
 
 type CallDetail = CallSummary & {
@@ -1069,10 +1145,10 @@ function CallsView() {
       {/* Transcript drawer */}
       {selected && (
         <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur flex items-center justify-center p-4" onClick={() => setSelected(null)}>
-          <div className="bg-card border border-border rounded-2xl w-full max-w-2xl max-h-[85vh] flex flex-col" onClick={e => e.stopPropagation()}>
+          <div className="bg-card border border-border rounded-2xl w-full max-w-5xl max-h-[88vh] flex flex-col" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-4 border-b border-border">
               <div>
-                <h2 className="text-base font-bold text-foreground">Call #{selected.id} transcript</h2>
+                <h2 className="text-base font-bold text-foreground">Call #{selected.id}</h2>
                 <p className="text-xs text-muted-foreground mt-0.5">
                   {CALL_TYPE_LABEL[selected.call_type] || selected.call_type} · {formatDateTime(selected.started_at)} · {formatDuration(selected.duration_s)}
                 </p>
@@ -1081,27 +1157,40 @@ function CallsView() {
                 <X className="w-4 h-4" />
               </button>
             </div>
-            <div className="flex-1 overflow-auto px-5 py-4 space-y-2">
-              {selected.error_message && (
-                <div className="bg-destructive/10 border border-destructive/20 rounded-xl px-3 py-2 text-xs text-destructive mb-3">
-                  Error: {selected.error_message}
-                </div>
-              )}
 
-              {/* AI post-call analysis */}
-              {(selected.summary || selected.sentiment || selected.extracted) && (
-                <div className="bg-primary/5 border border-primary/20 rounded-xl px-4 py-3 mb-3 space-y-2">
-                  <div className="flex items-center gap-2">
-                    <span className="text-[11px] font-bold uppercase tracking-wide text-primary">AI Summary</span>
-                    {selected.sentiment && (
-                      <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold border capitalize ${SENTIMENT_BADGE[selected.sentiment] || SENTIMENT_BADGE.neutral}`}>
-                        {selected.sentiment}
-                      </span>
-                    )}
+            <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-2 lg:divide-x divide-border overflow-hidden">
+              {/* LEFT — summary & result */}
+              <div className="overflow-auto px-5 py-4 space-y-3">
+                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-foreground">
+                  <Sparkles className="w-4 h-4 text-primary" /> Summary &amp; Result
+                </div>
+
+                {selected.error_message && (
+                  <div className="bg-destructive/10 border border-destructive/20 rounded-xl px-3 py-2 text-xs text-destructive">
+                    Error: {selected.error_message}
                   </div>
-                  {selected.summary && <p className="text-sm text-foreground leading-relaxed">{selected.summary}</p>}
-                  {selected.extracted && typeof selected.extracted === 'object' && !Array.isArray(selected.extracted) && Object.keys(selected.extracted).length > 0 && (
-                    <div className="grid grid-cols-2 gap-x-4 gap-y-1 pt-1">
+                )}
+
+                {(selected.summary || selected.sentiment) && (
+                  <div className="bg-primary/5 border border-primary/20 rounded-xl px-4 py-3 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[11px] font-bold uppercase tracking-wide text-primary">AI Summary</span>
+                      {selected.sentiment && (
+                        <span className={`inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-bold border capitalize ${SENTIMENT_BADGE[selected.sentiment] || SENTIMENT_BADGE.neutral}`}>
+                          {selected.sentiment}
+                        </span>
+                      )}
+                    </div>
+                    {selected.summary
+                      ? <p className="text-sm text-foreground leading-relaxed">{selected.summary}</p>
+                      : <p className="text-xs text-muted-foreground italic">No summary generated.</p>}
+                  </div>
+                )}
+
+                {selected.extracted && typeof selected.extracted === 'object' && !Array.isArray(selected.extracted) && Object.keys(selected.extracted).length > 0 && (
+                  <div className="rounded-xl border border-border bg-muted/20 px-4 py-3">
+                    <span className="text-[11px] font-bold uppercase tracking-wide text-muted-foreground">Extracted data</span>
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 pt-2">
                       {Object.entries(selected.extracted as Record<string, unknown>).map(([k, v]) => (
                         <div key={k} className="flex flex-col">
                           <span className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground">{k.replace(/_/g, ' ')}</span>
@@ -1109,37 +1198,39 @@ function CallsView() {
                         </div>
                       ))}
                     </div>
-                  )}
-                </div>
-              )}
-
-              {selected.transcript.length === 0 ? (
-                <p className="text-sm text-muted-foreground text-center py-8">No transcript captured.</p>
-              ) : selected.transcript.map((t, i) => (
-                t.role === 'tool' ? (
-                  <ToolChip key={i} name={t.name} args={t.args} result={t.result} />
-                ) : (
-                <div key={i} className={`flex ${t.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`max-w-[80%] px-3 py-2 rounded-xl text-sm leading-relaxed ${
-                    t.role === 'user'
-                      ? 'bg-primary text-primary-foreground rounded-br-sm'
-                      : 'bg-muted border border-border text-foreground rounded-bl-sm'
-                  }`}>
-                    <span className="block text-[10px] font-bold opacity-60 mb-0.5">
-                      {t.role === 'user' ? 'User' : 'Gemini'}
-                    </span>
-                    {t.text}
                   </div>
+                )}
+
+                {!selected.summary && !selected.sentiment && !selected.error_message &&
+                  !(selected.extracted && typeof selected.extracted === 'object' && Object.keys(selected.extracted as object).length > 0) && (
+                  <p className="text-sm text-muted-foreground italic py-2">No analysis available for this call.</p>
+                )}
+
+                {selected.system_prompt && (
+                  <details className="rounded-xl border border-border text-xs">
+                    <summary className="cursor-pointer font-semibold text-muted-foreground px-3 py-2">System prompt</summary>
+                    <pre className="mt-1 mx-3 mb-3 whitespace-pre-wrap text-muted-foreground/80 max-h-48 overflow-auto">{selected.system_prompt}</pre>
+                  </details>
+                )}
+              </div>
+
+              {/* RIGHT — transcript */}
+              <div className="overflow-auto px-5 py-4 space-y-2 bg-muted/10">
+                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-foreground sticky top-0 bg-card/80 backdrop-blur -mx-5 px-5 -mt-4 pt-4 pb-2 z-10">
+                  <ListVideo className="w-4 h-4 text-primary" /> Transcript
+                  <span className="text-[10px] font-normal text-muted-foreground normal-case">({selected.transcript.length} turns)</span>
                 </div>
-                )
-              ))}
+                {selected.transcript.length === 0 ? (
+                  <p className="text-sm text-muted-foreground text-center py-8">No transcript captured.</p>
+                ) : selected.transcript.map((t, i) => (
+                  t.role === 'tool' ? (
+                    <ToolChip key={i} name={t.name} args={t.args} status={t.status} result={t.result} request={t.request} />
+                  ) : (
+                    <ChatBubble key={i} role={t.role as 'user' | 'model'} text={t.text || ''} />
+                  )
+                ))}
+              </div>
             </div>
-            {selected.system_prompt && (
-              <details className="border-t border-border px-5 py-3 text-xs">
-                <summary className="cursor-pointer font-semibold text-muted-foreground">System prompt</summary>
-                <pre className="mt-2 whitespace-pre-wrap text-muted-foreground/80 max-h-32 overflow-auto">{selected.system_prompt}</pre>
-              </details>
-            )}
           </div>
         </div>
       )}
@@ -1524,8 +1615,22 @@ function TechSpecsView() {
 
 // ── Tools View ───────────────────────────────────────────────────────────────
 
-type ToolParam = { name: string; type: string; required: boolean; description: string }
+type ValueType = 'llm_prompt' | 'constant' | 'dynamic_variable'
+type ToolParam = {
+  name: string; type: string; required: boolean; description: string
+  value_type?: ValueType
+  constant_value?: string | null
+  dynamic_variable?: string | null
+  fallback?: string | null
+}
 type ToolResponseKey = { key: string; type: string; description: string }
+type ToolVariable = { name: string; label: string; populated: boolean; description: string }
+
+const VALUE_TYPE_META: Record<ValueType, { label: string; hint: string; icon: typeof Sparkles }> = {
+  llm_prompt:       { label: 'LLM Prompt',       hint: 'The agent fills this in — it can ask the caller. Describe what to capture below.', icon: Sparkles },
+  constant:         { label: 'Constant Value',   hint: 'A fixed value sent every call. You can embed {{variables}}.', icon: Braces },
+  dynamic_variable: { label: 'Dynamic Variable', hint: 'Pulled from call context (e.g. caller_id). The agent never fills this.', icon: Variable },
+}
 
 type Tool = {
   id: number
@@ -1559,6 +1664,7 @@ function emptyToolDraft(): ToolDraft {
 
 function ToolsView() {
   const [items, setItems] = useState<Tool[]>([])
+  const [variables, setVariables] = useState<ToolVariable[]>([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
   const [editing, setEditing] = useState<Tool | null>(null)
@@ -1572,9 +1678,13 @@ function ToolsView() {
   const load = useCallback(async () => {
     setLoading(true); setError('')
     try {
-      const r = await fetch(`${backendBase()}/api/tools/`)
+      const [r, rv] = await Promise.all([
+        fetch(`${backendBase()}/api/tools/`),
+        fetch(`${backendBase()}/api/tools/variables`).catch(() => null),
+      ])
       if (!r.ok) throw new Error(`Failed: ${r.status}`)
       setItems((await r.json()).items || [])
+      if (rv && rv.ok) setVariables((await rv.json()).items || [])
     } catch (e) { setError((e as Error).message) }
     finally { setLoading(false) }
   }, [])
@@ -1738,13 +1848,18 @@ function ToolsView() {
 
       {(creating || editing) && (
         <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur flex items-center justify-center p-4" onClick={closeModal}>
-          <div className="bg-card border border-border rounded-2xl w-full max-w-3xl max-h-[92vh] flex flex-col" onClick={e => e.stopPropagation()}>
+          <div className="bg-card border border-border rounded-2xl w-full max-w-6xl max-h-[92vh] flex flex-col" onClick={e => e.stopPropagation()}>
             <div className="flex items-center justify-between px-5 py-4 border-b border-border">
               <h2 className="text-base font-bold text-foreground">{editing ? `Edit "${editing.name}"` : 'New Tool'}</h2>
               <button onClick={closeModal} className="w-8 h-8 rounded-lg border border-border hover:bg-muted flex items-center justify-center"><X className="w-4 h-4" /></button>
             </div>
-            <div className="flex-1 overflow-auto px-5 py-4 space-y-4">
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-2 lg:divide-x divide-border overflow-hidden">
+              {/* LEFT — endpoint configuration */}
+              <div className="overflow-auto px-5 py-4 space-y-4">
+                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-foreground">
+                  <Webhook className="w-4 h-4 text-primary" /> Endpoint
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div>
                   <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1.5 block">Name</label>
                   <input type="text" value={draft.name} onChange={e => setDraft({ ...draft, name: e.target.value })}
@@ -1795,34 +1910,128 @@ function ToolsView() {
                   </div>
                 ))}
               </div>
+              </div>
+
+              {/* RIGHT — request payload */}
+              <div className="overflow-auto px-5 py-4 space-y-4 bg-muted/10">
+                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-foreground">
+                  <Braces className="w-4 h-4 text-primary" /> Request payload
+                </div>
 
               {/* Parameters */}
               <div>
                 <div className="flex items-center justify-between mb-1.5">
-                  <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Parameters <span className="opacity-60 normal-case">(what the agent sends)</span></label>
-                  <button onClick={() => setDraft({ ...draft, parameters: [...draft.parameters, { name: '', type: 'string', required: false, description: '' }] })}
+                  <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground">Parameters <span className="opacity-60 normal-case">(the body the agent sends)</span></label>
+                  <button onClick={() => setDraft({ ...draft, parameters: [...draft.parameters, { name: '', type: 'string', required: false, description: '', value_type: 'llm_prompt', constant_value: '', dynamic_variable: '', fallback: '' }] })}
                     className="text-xs text-primary hover:underline">+ Add parameter</button>
                 </div>
                 {draft.parameters.length === 0 ? (
                   <p className="text-[11px] text-muted-foreground italic">No parameters.</p>
-                ) : draft.parameters.map((p, i) => (
-                  <div key={i} className="grid grid-cols-12 gap-2 mb-1.5">
-                    <input value={p.name} placeholder="param_name" onChange={e => { const n = [...draft.parameters]; n[i] = { ...n[i], name: e.target.value }; setDraft({ ...draft, parameters: n }) }}
-                      className="col-span-3 bg-background border border-border rounded-lg px-2 py-1.5 text-xs font-mono" />
-                    <select value={p.type} onChange={e => { const n = [...draft.parameters]; n[i] = { ...n[i], type: e.target.value }; setDraft({ ...draft, parameters: n }) }}
-                      className="col-span-2 bg-background border border-border rounded-lg px-2 py-1.5 text-xs">
-                      <option>string</option><option>number</option><option>integer</option><option>boolean</option>
-                    </select>
-                    <input value={p.description} placeholder="What this param means…" onChange={e => { const n = [...draft.parameters]; n[i] = { ...n[i], description: e.target.value }; setDraft({ ...draft, parameters: n }) }}
-                      className="col-span-5 bg-background border border-border rounded-lg px-2 py-1.5 text-xs" />
-                    <label className="col-span-1 inline-flex items-center gap-1 text-xs justify-center">
-                      <input type="checkbox" checked={p.required} onChange={e => { const n = [...draft.parameters]; n[i] = { ...n[i], required: e.target.checked }; setDraft({ ...draft, parameters: n }) }} />
-                      req
-                    </label>
-                    <button onClick={() => setDraft({ ...draft, parameters: draft.parameters.filter((_, j) => j !== i) })}
-                      className="col-span-1 w-full h-full rounded-lg border border-border hover:bg-destructive/10 hover:text-destructive flex items-center justify-center"><X className="w-3.5 h-3.5" /></button>
+                ) : (
+                  <div className="space-y-2">
+                    {draft.parameters.map((p, i) => {
+                      const vt: ValueType = (p.value_type as ValueType) || 'llm_prompt'
+                      const meta = VALUE_TYPE_META[vt]
+                      const setParam = (patch: Partial<ToolParam>) => {
+                        const n = [...draft.parameters]; n[i] = { ...n[i], ...patch }; setDraft({ ...draft, parameters: n })
+                      }
+                      return (
+                        <div key={i} className="border border-border rounded-xl bg-muted/20 p-3 space-y-2.5">
+                          {/* Identifier + data type + required + delete */}
+                          <div className="flex items-center gap-2">
+                            <div className="flex-1 min-w-0">
+                              <label className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground block mb-1">Identifier</label>
+                              <input value={p.name} placeholder="param_name" onChange={e => setParam({ name: e.target.value })}
+                                className="w-full bg-background border border-border rounded-lg px-2.5 py-1.5 text-xs font-mono focus:outline-none focus:border-primary" />
+                            </div>
+                            <div className="w-28">
+                              <label className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground block mb-1">Data type</label>
+                              <div className="relative">
+                                <select value={p.type} onChange={e => setParam({ type: e.target.value })}
+                                  className="w-full appearance-none bg-background border border-border rounded-lg px-2.5 py-1.5 text-xs pr-7 focus:outline-none focus:border-primary">
+                                  <option>string</option><option>number</option><option>integer</option><option>boolean</option>
+                                </select>
+                                <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground pointer-events-none" />
+                              </div>
+                            </div>
+                            <label className="inline-flex flex-col items-center gap-1 text-[10px] font-semibold uppercase tracking-wide text-muted-foreground pt-0.5">
+                              Req
+                              <input type="checkbox" checked={p.required} onChange={e => setParam({ required: e.target.checked })} className="w-4 h-4 accent-primary" />
+                            </label>
+                            <button onClick={() => setDraft({ ...draft, parameters: draft.parameters.filter((_, j) => j !== i) })}
+                              className="mt-4 w-8 h-8 rounded-lg border border-border hover:bg-destructive/10 hover:text-destructive flex items-center justify-center flex-shrink-0"><X className="w-3.5 h-3.5" /></button>
+                          </div>
+
+                          {/* Value type selector */}
+                          <div>
+                            <label className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground block mb-1">Value Type</label>
+                            <div className="grid grid-cols-3 gap-1.5">
+                              {(Object.keys(VALUE_TYPE_META) as ValueType[]).map(k => {
+                                const m = VALUE_TYPE_META[k]; const Icon = m.icon; const active = vt === k
+                                return (
+                                  <button key={k} type="button" onClick={() => setParam({ value_type: k })}
+                                    className={`flex items-center justify-center gap-1.5 px-2 py-1.5 rounded-lg border text-[11px] font-medium transition-all ${active ? 'border-primary bg-primary/10 text-primary' : 'border-border hover:bg-muted text-muted-foreground'}`}>
+                                    <Icon className="w-3.5 h-3.5" /> {m.label}
+                                  </button>
+                                )
+                              })}
+                            </div>
+                            <p className="text-[10px] text-muted-foreground mt-1 flex items-start gap-1"><Info className="w-3 h-3 mt-px flex-shrink-0" />{meta.hint}</p>
+                          </div>
+
+                          {/* Conditional value input */}
+                          {vt === 'llm_prompt' && (
+                            <textarea value={p.description} rows={2} placeholder="Describe what the agent should capture, e.g. 'The caller's preferred callback date in YYYY-MM-DD format.'"
+                              onChange={e => setParam({ description: e.target.value })}
+                              className="w-full bg-background border border-border rounded-lg px-2.5 py-1.5 text-xs resize-y focus:outline-none focus:border-primary" />
+                          )}
+                          {vt === 'constant' && (
+                            <input value={p.constant_value || ''} placeholder="Fixed value — supports {{caller_id}} etc."
+                              onChange={e => setParam({ constant_value: e.target.value })}
+                              className="w-full bg-background border border-border rounded-lg px-2.5 py-1.5 text-xs font-mono focus:outline-none focus:border-primary" />
+                          )}
+                          {vt === 'dynamic_variable' && (
+                            <div className="space-y-1.5">
+                              <div className="relative">
+                                <select value={p.dynamic_variable || ''} onChange={e => setParam({ dynamic_variable: e.target.value })}
+                                  className="w-full appearance-none bg-background border border-border rounded-lg px-2.5 py-1.5 text-xs pr-7 font-mono focus:outline-none focus:border-primary">
+                                  <option value="">Select a variable…</option>
+                                  {variables.map(v => (
+                                    <option key={v.name} value={v.name}>{v.name}{v.populated ? '' : ' (not yet populated)'} — {v.label}</option>
+                                  ))}
+                                </select>
+                                <ChevronDown className="absolute right-2 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground pointer-events-none" />
+                              </div>
+                              <div>
+                                <label className="text-[10px] font-semibold uppercase tracking-wide text-muted-foreground/70 block mb-0.5">Fallback value</label>
+                                <input value={p.fallback || ''} placeholder="Sent if the variable is empty (e.g. on browser calls)"
+                                  onChange={e => setParam({ fallback: e.target.value })}
+                                  className="w-full bg-background border border-border rounded-lg px-2.5 py-1.5 text-xs font-mono focus:outline-none focus:border-primary" />
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      )
+                    })}
                   </div>
-                ))}
+                )}
+                {/* Dynamic-variable reference */}
+                {variables.length > 0 && (
+                  <details className="mt-2 border border-border rounded-lg bg-muted/10">
+                    <summary className="cursor-pointer px-2.5 py-1.5 text-[11px] font-semibold text-muted-foreground flex items-center gap-1.5">
+                      <Variable className="w-3.5 h-3.5" /> Available dynamic variables ({variables.length})
+                    </summary>
+                    <div className="px-2.5 pb-2.5 grid grid-cols-1 sm:grid-cols-2 gap-1">
+                      {variables.map(v => (
+                        <div key={v.name} className="text-[10px] flex items-baseline gap-1.5">
+                          <code className={`font-mono ${v.populated ? 'text-primary' : 'text-muted-foreground/60'}`}>{'{{'}{v.name}{'}}'}</code>
+                          <span className="text-muted-foreground truncate">{v.description}</span>
+                        </div>
+                      ))}
+                    </div>
+                    <p className="px-2.5 pb-2 text-[10px] text-muted-foreground italic">Use these anywhere — parameters, the URL, header values, or inside a constant.</p>
+                  </details>
+                )}
               </div>
 
               {/* Response schema */}
@@ -1870,6 +2079,7 @@ function ToolsView() {
                   </div>
                 </details>
               )}
+              </div>
             </div>
             <div className="flex items-center justify-end gap-2 px-5 py-3 border-t border-border">
               <button onClick={closeModal} className="px-4 py-2 rounded-lg border border-border hover:bg-muted text-sm font-medium">Cancel</button>
@@ -1893,6 +2103,7 @@ type Agent = {
   name: string
   description: string | null
   system_prompt: string
+  first_message: string | null
   language: string
   voice: string
   tool_ids: number[]
@@ -1910,6 +2121,7 @@ type AgentDraft = {
   name: string
   description: string
   system_prompt: string
+  first_message: string
   language: string
   voice: string
   tool_ids: number[]
@@ -1921,7 +2133,7 @@ type AgentDraft = {
 
 function emptyDraft(): AgentDraft {
   return {
-    name: '', description: '', system_prompt: '',
+    name: '', description: '', system_prompt: '', first_message: '',
     language: 'en', voice: 'Aoede', tool_ids: [], kb_collection_ids: [],
     ambient_always: null, ambient_tool_call: null, ambient_volume: 0.15,
   }
@@ -1974,6 +2186,7 @@ function AgentsView() {
       name: a.name,
       description: a.description || '',
       system_prompt: a.system_prompt,
+      first_message: a.first_message || '',
       language: a.language,
       voice: a.voice,
       tool_ids: [...(a.tool_ids || [])],
@@ -2018,6 +2231,7 @@ function AgentsView() {
         ? {
             description: draft.description,
             system_prompt: draft.system_prompt,
+            first_message: draft.first_message,
             language: draft.language,
             voice: draft.voice,
             tool_ids: draft.tool_ids,
@@ -2304,9 +2518,20 @@ function AmbiencePicker({ label, hint, value, volume, options, onChange }: {
   )
 }
 
+type AgentTab = 'agent' | 'tools' | 'kb' | 'ambience'
+
 function AgentEditor({ editing, draft, setDraft, allTools, ambience, kbCollections, toggleTool, toggleKb, saving, error, onCancel, onSave }: AgentEditorProps) {
   const alwaysOptions   = ambience.filter(a => a.category === 'always' || a.category === 'both')
   const toolCallOptions = ambience.filter(a => a.category === 'tool_call' || a.category === 'both')
+  const [tab, setTab] = useState<AgentTab>('agent')
+
+  const ambientCount = (draft.ambient_always ? 1 : 0) + (draft.ambient_tool_call ? 1 : 0)
+  const TABS: { id: AgentTab; label: string; icon: typeof Bot; count?: number }[] = [
+    { id: 'agent',    label: 'Agent',          icon: Bot },
+    { id: 'tools',    label: 'Tools',          icon: Wrench,   count: draft.tool_ids.length },
+    { id: 'kb',       label: 'Knowledge Base', icon: BookOpen, count: draft.kb_collection_ids.length },
+    { id: 'ambience', label: 'Ambience',       icon: Volume2,  count: ambientCount },
+  ]
 
   return (
     <div className="flex-1 flex flex-col min-h-0 overflow-y-auto">
@@ -2349,7 +2574,32 @@ function AgentEditor({ editing, draft, setDraft, allTools, ambience, kbCollectio
         </div>
       </div>
 
-      <div className="px-6 py-5 max-w-5xl w-full mx-auto flex flex-col gap-5">
+      {/* Tab bar */}
+      <div className="sticky top-[57px] z-10 bg-card/80 backdrop-blur border-b border-border px-6">
+        <div className="max-w-6xl w-full mx-auto flex items-center gap-1">
+          {TABS.map(t => {
+            const Icon = t.icon
+            const active = tab === t.id
+            return (
+              <button
+                key={t.id}
+                onClick={() => setTab(t.id)}
+                className={`relative flex items-center gap-2 px-4 py-3 text-sm font-medium transition-colors border-b-2 -mb-px ${
+                  active ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'
+                }`}
+              >
+                <Icon className="w-4 h-4" />
+                {t.label}
+                {t.count != null && t.count > 0 && (
+                  <span className={`text-[10px] font-bold rounded-full px-1.5 py-0.5 leading-none ${active ? 'bg-primary/15 text-primary' : 'bg-muted text-muted-foreground'}`}>{t.count}</span>
+                )}
+              </button>
+            )
+          })}
+        </div>
+      </div>
+
+      <div className="px-6 py-5 max-w-6xl w-full mx-auto flex flex-col gap-5">
         {error && (
           <div className="bg-destructive/10 border border-destructive/20 rounded-xl px-4 py-3 text-sm text-destructive">
             {error}
@@ -2357,6 +2607,7 @@ function AgentEditor({ editing, draft, setDraft, allTools, ambience, kbCollectio
         )}
 
         {/* ─── Basics ─── */}
+        {tab === 'agent' && (<>
         <section className="card flex flex-col gap-3">
           <h2 className="text-sm font-bold uppercase tracking-wide text-foreground">Basics</h2>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -2426,7 +2677,26 @@ function AgentEditor({ editing, draft, setDraft, allTools, ambience, kbCollectio
           />
         </section>
 
+        {/* ─── First message ─── */}
+        <section className="card flex flex-col gap-2">
+          <h2 className="text-sm font-bold uppercase tracking-wide text-foreground flex items-center gap-2">
+            <Sparkles className="w-4 h-4" /> First Message
+          </h2>
+          <p className="text-xs text-muted-foreground -mt-1">
+            Spoken aloud the moment the call connects, before the caller says anything. Supports <code className="font-mono">{'{{variables}}'}</code> like <code className="font-mono">{'{{caller_name}}'}</code>. Leave blank to let the agent wait for the caller.
+          </p>
+          <textarea
+            value={draft.first_message}
+            onChange={e => setDraft({ ...draft, first_message: e.target.value })}
+            rows={2}
+            className="w-full bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary resize-y"
+            placeholder="Namaskar, main Kanika hu, Rate-per-square-feet se. Aap kis sheher mein property dhund rahe hain?"
+          />
+        </section>
+        </>)}
+
         {/* ─── Tools ─── */}
+        {tab === 'tools' && (
         <section className="card flex flex-col gap-3">
           <h2 className="text-sm font-bold uppercase tracking-wide text-foreground">
             Tools <span className="text-[11px] font-normal text-muted-foreground normal-case ml-1">({draft.tool_ids.length} selected — Gemini decides when to call them)</span>
@@ -2457,8 +2727,10 @@ function AgentEditor({ editing, draft, setDraft, allTools, ambience, kbCollectio
             </div>
           )}
         </section>
+        )}
 
         {/* ─── Knowledge bases ─── */}
+        {tab === 'kb' && (
         <section className="card flex flex-col gap-3">
           <div>
             <h2 className="text-sm font-bold uppercase tracking-wide text-foreground flex items-center gap-2">
@@ -2496,8 +2768,10 @@ function AgentEditor({ editing, draft, setDraft, allTools, ambience, kbCollectio
             </div>
           )}
         </section>
+        )}
 
         {/* ─── Background ambience ─── */}
+        {tab === 'ambience' && (
         <section className="card flex flex-col gap-4">
           <div className="flex items-start justify-between gap-3 flex-wrap">
             <div>
@@ -2541,6 +2815,7 @@ function AgentEditor({ editing, draft, setDraft, allTools, ambience, kbCollectio
             onChange={slug => setDraft({ ...draft, ambient_tool_call: slug })}
           />
         </section>
+        )}
       </div>
     </div>
   )
@@ -2579,8 +2854,9 @@ function CostingView() {
     staleTime: 3_600_000,
   })
 
-  const [hoursPerDay, setHoursPerDay] = useState(2)
-  const [daysPerMonth, setDaysPerMonth] = useState(30)
+  // Default 5 hrs/day × 20 working days = 6,000 billable minutes/month.
+  const [hoursPerDay, setHoursPerDay] = useState(5)
+  const [daysPerMonth, setDaysPerMonth] = useState(20)
   const [geminiUsdPerMin, setGeminiUsdPerMin] = useState(0.03)
   const [telephonyInrPerMin, setTelephonyInrPerMin] = useState(0.5)
   const [usdToInr, setUsdToInr] = useState(83)
@@ -2685,17 +2961,22 @@ function CostingView() {
               <IndianRupee className="w-7 h-7" />
               {fmtInr(monthlyInr)}
             </span>
-            <span className="text-xs text-muted-foreground">per month</span>
+            <span className="text-xs text-muted-foreground">
+              per month
+              {usdToInr > 0 && <> · ≈ ${(monthlyInr / usdToInr).toLocaleString('en-US', { maximumFractionDigits: 2 })}</>}
+            </span>
           </div>
 
           <div className="grid grid-cols-2 gap-3">
             <div className="bg-muted/40 border border-border rounded-lg p-3">
               <div className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground">Per day</div>
               <div className="text-lg font-bold text-foreground">₹{fmtInr(dailyInr)}</div>
+              {usdToInr > 0 && <div className="text-[11px] font-medium text-muted-foreground/70">≈ ${(dailyInr / usdToInr).toFixed(2)}</div>}
             </div>
             <div className="bg-muted/40 border border-border rounded-lg p-3">
               <div className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground">Per minute</div>
               <div className="text-lg font-bold text-foreground">₹{perMinInr.toFixed(2)}</div>
+              {usdToInr > 0 && <div className="text-[11px] font-medium text-muted-foreground/70">≈ ${(perMinInr / usdToInr).toFixed(3)}</div>}
             </div>
             <div className="bg-muted/40 border border-border rounded-lg p-3">
               <div className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground">Minutes / month</div>
@@ -2704,6 +2985,7 @@ function CostingView() {
             <div className="bg-muted/40 border border-border rounded-lg p-3">
               <div className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground">Gemini rate</div>
               <div className="text-lg font-bold text-foreground">₹{geminiInrPerMin.toFixed(2)} / min</div>
+              {usdToInr > 0 && <div className="text-[11px] font-medium text-muted-foreground/70">≈ ${(geminiInrPerMin / usdToInr).toFixed(3)} / min</div>}
             </div>
           </div>
 
@@ -3370,8 +3652,11 @@ export default function GeminiPage() {
   const [language, setLanguage] = useState('en')
   const [templateIdx, setTemplateIdx] = useState(0)
   const [systemPrompt, setSystemPrompt] = useState(templates[0]?.prompt || '')
+  const [firstMessage, setFirstMessage] = useState(templates[0]?.first_message || '')
   const [muted, setMuted] = useState(false)
   const [voice, setVoice] = useState('Aoede')
+  const [avatarUrl, setAvatarUrl] = useState<string>(DEFAULT_AVATAR_URL)
+  const [cameraView, setCameraView] = useState<CameraView>(DEFAULT_CAMERA_VIEW)
   const [toolIds, setToolIds] = useState<number[]>(templates[0]?.tool_ids || [])
   const [kbCollectionIds, setKbCollectionIds] = useState<number[]>(templates[0]?.kb_collection_ids || [])
   const [ambientAlways, setAmbientAlways] = useState<string | null>(templates[0]?.ambient_always ?? null)
@@ -3381,8 +3666,8 @@ export default function GeminiPage() {
 
   const { openConfigModal } = useUIStore()
 
-  const { status, inCall, isConnected, transcript, errorCode, lastLatencyMs, sentiment, startCall, hangUp, clearTranscript, clearError, playAnalyserRef } =
-    useGeminiVoice(systemPrompt, language, voice, toolIds, ambientAlways, ambientToolCall, ambientVolume, kbCollectionIds)
+  const { status, inCall, isConnected, transcript, errorCode, lastLatencyMs, sentiment, startCall, hangUp, clearTranscript, clearError, audioSinkRef, audioInterruptRef } =
+    useGeminiVoice(systemPrompt, language, voice, toolIds, ambientAlways, ambientToolCall, ambientVolume, kbCollectionIds, firstMessage)
 
   useEffect(() => {
     transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' })
@@ -3393,6 +3678,7 @@ export default function GeminiPage() {
     const t = templates[idx]
     if (t) {
       setSystemPrompt(t.prompt)
+      setFirstMessage(t.first_message || '')
       if (t.voice) setVoice(t.voice)
       if (t.language) setLanguage(t.language)
       setToolIds(t.tool_ids || [])
@@ -3671,9 +3957,44 @@ export default function GeminiPage() {
                   </div>
                 )}
 
-                {/* Avatar */}
-                <div className="flex-1 flex items-center justify-center">
-                  <GeminiAvatar inCall={inCall} status={status} analyserRef={playAnalyserRef} mood={inCall ? (sentiment?.label ?? null) : null} />
+                {/* Avatar stage — controls float in the surrounding whitespace */}
+                <div className="relative flex-1 w-full flex items-center justify-center min-h-0">
+                  {/* Avatar picker — top-left */}
+                  <div className="absolute top-3 left-3 z-10 flex flex-col gap-1.5">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground/60 pl-1">Avatar</span>
+                    {AVATARS.map(a => (
+                      <button
+                        key={a.id}
+                        onClick={() => setAvatarUrl(a.url)}
+                        className={`px-3 py-1.5 rounded-lg text-xs font-semibold text-left transition-all border ${
+                          avatarUrl === a.url
+                            ? 'bg-primary text-primary-foreground border-primary shadow-sm'
+                            : 'bg-card/70 backdrop-blur text-foreground border-border hover:bg-muted'
+                        }`}
+                      >
+                        {a.label}
+                      </button>
+                    ))}
+                  </div>
+
+                  <GeminiAvatar inCall={inCall} status={status} audioSinkRef={audioSinkRef} audioInterruptRef={audioInterruptRef} avatarUrl={avatarUrl} cameraView={cameraView} width={340} height={460} mood={inCall ? (sentiment?.label ?? null) : null} />
+
+                  {/* Camera framing — bottom-center segmented control */}
+                  <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1 bg-card/70 backdrop-blur border border-border rounded-full p-1 shadow-sm">
+                    {CAMERA_VIEWS.map(v => (
+                      <button
+                        key={v.value}
+                        onClick={() => setCameraView(v.value)}
+                        className={`px-3 py-1.5 rounded-full text-xs font-semibold transition-all ${
+                          cameraView === v.value
+                            ? 'bg-primary text-primary-foreground shadow-sm'
+                            : 'text-muted-foreground hover:text-foreground'
+                        }`}
+                      >
+                        {v.label}
+                      </button>
+                    ))}
+                  </div>
                 </div>
 
                 {/* Call button */}
@@ -3713,25 +4034,26 @@ export default function GeminiPage() {
                 {/* Transcript */}
                 {(transcript.length > 0 || (inCall && transcript.length === 0)) && (
                   <div className="w-full mt-4 bg-muted/30 border border-border rounded-xl p-3 max-h-44 overflow-y-auto space-y-2">
+                    {transcript.length > 0 && (
+                      <div className="flex items-center justify-between sticky -top-3 -mx-3 -mt-3 px-3 pt-2.5 pb-1.5 mb-1 bg-muted/95 backdrop-blur z-10 border-b border-border">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground/60">Transcript</span>
+                        <button
+                          onClick={clearTranscript}
+                          className="flex items-center gap-1 text-[11px] font-semibold text-muted-foreground hover:text-destructive transition-colors"
+                        >
+                          <Trash2 className="w-3 h-3" />
+                          Clear
+                        </button>
+                      </div>
+                    )}
                     {inCall && transcript.length === 0 && (
                       <p className="text-xs text-muted-foreground/60 text-center py-2">Listening… start speaking</p>
                     )}
                     {transcript.map(entry => (
                       entry.role === 'tool' ? (
-                        <ToolChip key={entry.id} name={entry.toolName} args={entry.toolArgs} status={entry.toolStatus} />
+                        <ToolChip key={entry.id} name={entry.toolName} args={entry.toolArgs} status={entry.toolStatus} result={entry.toolResult} request={entry.toolRequest} />
                       ) : (
-                      <div key={entry.id} className={`flex ${entry.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                        <div className={`max-w-[80%] px-3 py-2 rounded-xl text-xs leading-relaxed ${
-                          entry.role === 'user'
-                            ? 'bg-primary text-primary-foreground rounded-br-sm'
-                            : 'bg-card border border-border text-foreground rounded-bl-sm'
-                        }`}>
-                          <span className="block text-[10px] font-bold opacity-60 mb-0.5">
-                            {entry.role === 'user' ? 'You' : 'Gemini'}
-                          </span>
-                          {entry.text}
-                        </div>
-                      </div>
+                        <ChatBubble key={entry.id} role={entry.role as 'user' | 'model'} text={entry.text} />
                       )
                     ))}
                     <div ref={transcriptEndRef} />

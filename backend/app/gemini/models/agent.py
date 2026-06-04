@@ -13,6 +13,9 @@ class GeminiAgent(Base):
     name: Mapped[str] = mapped_column(String(128), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     system_prompt: Mapped[str] = mapped_column(Text, nullable=False)
+    # Spoken verbatim by the agent the moment the call connects (null/empty =
+    # wait for the caller to speak first). Supports {{variables}}.
+    first_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     language: Mapped[str] = mapped_column(String(16), nullable=False, default="en")
     voice: Mapped[str] = mapped_column(String(64), nullable=False, default="Aoede")
     tool_ids: Mapped[Any] = mapped_column(JSON, nullable=False, default=list)  # list[int]

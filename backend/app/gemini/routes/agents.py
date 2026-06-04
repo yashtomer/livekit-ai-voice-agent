@@ -32,6 +32,7 @@ class AgentCreate(BaseModel):
     name: constr(strip_whitespace=True, min_length=1, max_length=128)
     description: Optional[constr(strip_whitespace=True, max_length=255)] = None
     system_prompt: constr(strip_whitespace=True, min_length=1)
+    first_message: Optional[constr(strip_whitespace=True, max_length=2000)] = None
     language: constr(strip_whitespace=True, min_length=1, max_length=16) = "en"
     voice: constr(strip_whitespace=True, min_length=1, max_length=64) = "Aoede"
     tool_ids: list[int] = []
@@ -45,6 +46,7 @@ class AgentUpdate(BaseModel):
     name: Optional[constr(strip_whitespace=True, min_length=1, max_length=128)] = None
     description: Optional[constr(strip_whitespace=True, max_length=255)] = None
     system_prompt: Optional[constr(strip_whitespace=True, min_length=1)] = None
+    first_message: Optional[constr(strip_whitespace=True, max_length=2000)] = None
     language: Optional[constr(strip_whitespace=True, min_length=1, max_length=16)] = None
     voice: Optional[constr(strip_whitespace=True, min_length=1, max_length=64)] = None
     tool_ids: Optional[list[int]] = None
@@ -69,6 +71,7 @@ def _serialize(row: GeminiAgent) -> dict:
         "name": row.name,
         "description": row.description,
         "system_prompt": row.system_prompt,
+        "first_message": getattr(row, "first_message", None),
         "language": row.language,
         "voice": row.voice,
         "tool_ids": list(row.tool_ids or []),
@@ -106,6 +109,7 @@ async def create_agent(body: AgentCreate, db: AsyncSession = Depends(get_db)):
         name=body.name,
         description=body.description,
         system_prompt=body.system_prompt,
+        first_message=body.first_message or None,
         language=body.language,
         voice=body.voice,
         tool_ids=list(body.tool_ids or []),
