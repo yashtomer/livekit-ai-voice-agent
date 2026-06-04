@@ -16,6 +16,7 @@ For a given agent ID (or list of tool IDs), this module:
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Optional
 
 import aiohttp
@@ -26,6 +27,76 @@ from ..models.tool import GeminiTool
 from ..agent_tools import TOOL_REGISTRY as PYTHON_TOOL_REGISTRY
 
 log = logging.getLogger("tools_runtime")
+
+
+# ── Dynamic variables ─────────────────────────────────────────────────────────
+# Catalog of variables a tool parameter / URL / header can bind to. `populated`
+# flags whether `build_call_context` currently fills the value (others resolve to
+# "" until a CRM/contact lookup is wired up). Surfaced to the UI via
+# GET /api/tools/variables.
+AVAILABLE_VARIABLES: list[dict[str, Any]] = [
+    {"name": "caller_id",               "label": "Caller phone",        "populated": True,  "description": "The caller's phone number (E.164 without '+')."},
+    {"name": "call_sid",                "label": "Call SID",            "populated": True,  "description": "Telephony provider call/stream identifier."},
+    {"name": "system__conversation_id", "label": "Conversation ID",     "populated": True,  "description": "Internal call-log id for this conversation."},
+    {"name": "system__time",            "label": "Current time",        "populated": True,  "description": "Current timestamp (ISO 8601) when the tool is called."},
+    {"name": "system__timezone",        "label": "Timezone",            "populated": True,  "description": "Server timezone name."},
+    {"name": "caller_name",             "label": "Caller name",         "populated": False, "description": "Caller's name (empty until a contact lookup is configured)."},
+    {"name": "caller_email",            "label": "Caller email",        "populated": False, "description": "Caller's email (empty until a contact lookup is configured)."},
+    {"name": "is_returning_caller",     "label": "Returning caller",    "populated": False, "description": "'true'/'false' (empty until a contact lookup is configured)."},
+    {"name": "previous_classification", "label": "Prev. classification","populated": False, "description": "Last call's lead/contact/spam classification."},
+    {"name": "previous_enquiries_count","label": "Prev. enquiries",     "populated": False, "description": "Count of prior enquiries from this caller."},
+    {"name": "last_enquiry_summary",    "label": "Last enquiry",        "populated": False, "description": "Summary of the caller's last requirement."},
+]
+
+_VAR_RE = re.compile(r"\{\{\s*([a-zA-Z0-9_]+)\s*\}\}")
+
+
+def build_call_context(
+    *,
+    caller_id: str | None = None,
+    call_sid: str | None = None,
+    conversation_id: str | int | None = None,
+    now_iso: str | None = None,
+    timezone: str | None = None,
+    extra: dict[str, Any] | None = None,
+) -> dict[str, str]:
+    """Assemble the dynamic-variable map used to resolve tool args at call time.
+
+    Every variable in AVAILABLE_VARIABLES gets a key (defaulting to "") so a
+    binding never raises; callers fill in what they know. `extra` overrides/adds.
+    """
+    from datetime import datetime, timezone as _tz
+
+    ctx: dict[str, str] = {v["name"]: "" for v in AVAILABLE_VARIABLES}
+    ctx["caller_id"] = (caller_id or "").lstrip("+")
+    ctx["call_sid"] = call_sid or ""
+    ctx["system__conversation_id"] = str(conversation_id) if conversation_id is not None else ""
+    ctx["system__time"] = now_iso or datetime.now(_tz.utc).isoformat()
+    ctx["system__timezone"] = timezone or "UTC"
+    if extra:
+        ctx.update({k: ("" if v is None else str(v)) for k, v in extra.items()})
+    return ctx
+
+
+def _substitute(template: Any, context: dict[str, str]) -> Any:
+    """Replace {{variable}} placeholders in a string using `context`.
+
+    Non-strings pass through untouched. Unknown variables resolve to "".
+    """
+    if not isinstance(template, str) or "{{" not in template:
+        return template
+    return _VAR_RE.sub(lambda m: context.get(m.group(1), ""), template)
+
+
+def render_template(template: str, context: dict[str, str] | None = None) -> str:
+    """Public helper: substitute {{variables}} in arbitrary text (e.g. a greeting)."""
+    return _substitute(template or "", context or {})
+
+
+# A parameter is exposed to the LLM only when its value_type is LLM-driven.
+# Missing value_type (legacy rows) defaults to LLM-driven for backwards compat.
+def _is_llm_param(p: dict[str, Any]) -> bool:
+    return (p.get("value_type") or "llm_prompt") == "llm_prompt"
 
 # Lifecycle: one shared HTTP session per process is fine; tools rarely fan out.
 _http_session: Optional[aiohttp.ClientSession] = None
@@ -57,6 +128,10 @@ def _build_declaration(tool: GeminiTool):
     for p in tool.parameters or []:
         name = p.get("name")
         if not name:
+            continue
+        # Constant / dynamic-variable params are injected server-side at dispatch;
+        # the LLM never sees or fills them.
+        if not _is_llm_param(p):
             continue
         properties[name] = {
             "type": _TYPE_MAP.get((p.get("type") or "string").lower(), "STRING"),
@@ -160,19 +235,69 @@ async def build_gemini_tools(tool_ids: list[int], kb_collection_ids: list[int] |
 
 # ── Dispatch ────────────────────────────────────────────────────────────────
 
-async def _http_call(tool: GeminiTool, args: dict[str, Any]) -> dict[str, Any]:
+def resolve_tool_args(
+    tool: GeminiTool, llm_args: dict[str, Any], context: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    """Merge LLM-provided args with server-sourced parameter values.
+
+    For each declared parameter:
+      • llm_prompt       → take the model's value (from `llm_args`).
+      • constant         → its `constant_value`, with {{variables}} substituted.
+      • dynamic_variable → the named variable's value from `context` ("" if unknown).
+
+    Parameters not declared on the tool but emitted by the model are dropped, so
+    a model can never override a server-injected value. Returns the final payload.
+    """
+    ctx = context or {}
+    params = tool.parameters or []
+    if not params:
+        # No declared params — pass the model's args through unchanged.
+        return dict(llm_args or {})
+
+    resolved: dict[str, Any] = {}
+    for p in params:
+        name = p.get("name")
+        if not name:
+            continue
+        vtype = p.get("value_type") or "llm_prompt"
+        if vtype == "constant":
+            resolved[name] = _substitute(p.get("constant_value") or "", ctx)
+        elif vtype == "dynamic_variable":
+            var = (p.get("dynamic_variable") or "").strip()
+            val = ctx.get(var, "")
+            # Fall back to the configured default when the variable is missing
+            # or empty (e.g. caller_id / call_sid on a browser call).
+            if val in (None, ""):
+                val = _substitute(p.get("fallback") or "", ctx)
+            resolved[name] = val
+        else:  # llm_prompt
+            if llm_args and name in llm_args:
+                resolved[name] = llm_args[name]
+    return resolved
+
+
+async def _http_call(tool: GeminiTool, args: dict[str, Any],
+                     context: dict[str, str] | None = None,
+                     meta_out: dict[str, Any] | None = None) -> dict[str, Any]:
     if not tool.url:
         return {"status": "error", "message": f"Tool {tool.slug} has no URL configured"}
+    ctx = context or {}
     method = (tool.http_method or "GET").upper()
-    headers = dict(tool.headers or {})
+    # URL and header values may embed {{variables}} too.
+    url = _substitute(tool.url, ctx)
+    headers = {k: _substitute(v, ctx) for k, v in (tool.headers or {}).items()}
+    # Record the outgoing request for the transcript timeline. Headers are
+    # intentionally omitted — they can carry secrets (auth tokens).
+    if meta_out is not None:
+        meta_out.update({"kind": "http", "method": method, "url": url, "payload": args})
     try:
         session = _http()
         if method == "GET":
-            async with session.get(tool.url, params=args, headers=headers) as resp:
+            async with session.get(url, params=args, headers=headers) as resp:
                 body = await resp.text()
         else:
             headers.setdefault("Content-Type", "application/json")
-            async with session.request(method, tool.url, json=args, headers=headers) as resp:
+            async with session.request(method, url, json=args, headers=headers) as resp:
                 body = await resp.text()
 
         # Try JSON first; if not JSON, wrap raw body.
@@ -187,8 +312,17 @@ async def _http_call(tool: GeminiTool, args: dict[str, Any]) -> dict[str, Any]:
 
 
 async def dispatch_tool_call(tool_ids: list[int], name: str, args: dict[str, Any],
-                              kb_collection_ids: list[int] | None = None) -> dict[str, Any]:
+                              kb_collection_ids: list[int] | None = None,
+                              context: dict[str, str] | None = None,
+                              meta_out: dict[str, Any] | None = None) -> dict[str, Any]:
     """Resolve `name` against the agent's tool list and dispatch.
+
+    `context` holds dynamic-variable values (caller_id, system__time, …) used to
+    fill constant/dynamic-variable parameters and substitute {{vars}} in the URL
+    and headers. See `build_call_context`.
+
+    `meta_out`, when provided, is populated with the actual outgoing request
+    (kind/method/url/payload) so the caller can surface it in the transcript.
 
     Lookup order:
       1. The synthetic `search_knowledge_base` (when the agent has KB collections).
@@ -200,6 +334,8 @@ async def dispatch_tool_call(tool_ids: list[int], name: str, args: dict[str, Any
         if not kb_collection_ids:
             return {"status": "error", "message": "Agent has no knowledge-base configured"}
         query = (args or {}).get("query") or ""
+        if meta_out is not None:
+            meta_out.update({"kind": "kb_search", "payload": {"query": str(query), "collection_ids": list(kb_collection_ids)}})
         try:
             from ..kb.search import search as kb_search
             hits = await kb_search(collection_ids=kb_collection_ids, query=str(query), top_k=5)
@@ -228,18 +364,23 @@ async def dispatch_tool_call(tool_ids: list[int], name: str, args: dict[str, Any
     tools = await load_tools_by_ids(tool_ids)
     match = next((t for t in tools if t.slug == name), None)
     if match:
+        resolved = resolve_tool_args(match, args or {}, context)
         if match.is_builtin and not match.url:
+            if meta_out is not None:
+                meta_out.update({"kind": "builtin", "payload": resolved})
             fn = PYTHON_TOOL_REGISTRY.get(name)
             if fn:
                 try:
-                    return fn(**(args or {}))
+                    return fn(**resolved)
                 except Exception as e:
                     log.exception("Builtin tool %s failed", name)
                     return {"status": "error", "message": str(e)}
             return {"status": "error", "message": f"Builtin tool {name} has no Python implementation"}
-        return await _http_call(match, args or {})
+        return await _http_call(match, resolved, context, meta_out)
 
     # 3. Direct Python fallback (in case the agent has no tool_ids but tool was emitted)
+    if meta_out is not None:
+        meta_out.update({"kind": "builtin", "payload": dict(args or {})})
     fn = PYTHON_TOOL_REGISTRY.get(name)
     if fn:
         try:

@@ -93,6 +93,11 @@ async def _migrate_schema() -> None:
             "ALTER TABLE gemini_agents ADD COLUMN IF NOT EXISTS "
             "kb_collection_ids JSONB NOT NULL DEFAULT '[]'::jsonb"
         ))
+        # gemini_agents.first_message — greeting the agent speaks on connect.
+        await conn.execute(text(
+            "ALTER TABLE gemini_agents ADD COLUMN IF NOT EXISTS "
+            "first_message TEXT"
+        ))
         # gemini_call_logs — post-call AI analysis fields (summary/sentiment/extraction).
         await conn.execute(text(
             "ALTER TABLE gemini_call_logs ADD COLUMN IF NOT EXISTS summary TEXT"

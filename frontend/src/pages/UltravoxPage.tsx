@@ -89,8 +89,7 @@ function UltravoxCallPanel() {
       sessionRef.current = null
       endCall()
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [])
+  }, [endCall])
 
   const syncStatus = (s: UltravoxSessionStatus) => {
     statusRef.current = s
@@ -342,8 +341,9 @@ function UltravoxCosting() {
     staleTime: 3_600_000,
   })
 
-  const [hoursPerDay, setHoursPerDay] = useState(2)
-  const [daysPerMonth, setDaysPerMonth] = useState(30)
+  // Default 5 hrs/day × 20 working days = 6,000 minutes/month.
+  const [hoursPerDay, setHoursPerDay] = useState(5)
+  const [daysPerMonth, setDaysPerMonth] = useState(20)
   const [uvUsdPerMin, setUvUsdPerMin] = useState(ULTRAVOX_USD_PER_MIN)
   const [freeMinutes, setFreeMinutes] = useState(ULTRAVOX_FREE_MINUTES)
   const [includeSip, setIncludeSip] = useState(false)

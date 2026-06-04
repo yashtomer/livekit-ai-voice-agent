@@ -18,6 +18,8 @@ export interface GeminiTranscriptEntry {
   toolName?: string
   toolArgs?: Record<string, unknown>
   toolStatus?: string | null
+  toolResult?: unknown
+  toolRequest?: { kind?: string; method?: string; url?: string; payload?: unknown } | null
 }
 
 const RECORD_SAMPLE_RATE = 16000
@@ -59,6 +61,7 @@ export default function useGeminiVoice(
   ambientToolCall: string | null = null,
   ambientVolume = 0.15,
   kbCollectionIds: number[] = [],
+  firstMessage = '',
 ) {
   const [status, setStatus] = useState<GeminiStatus>('idle')
   const [inCall, setInCall] = useState(false)
@@ -93,7 +96,9 @@ export default function useGeminiVoice(
   const ambientToolCallRef = useRef(ambientToolCall)
   const ambientVolumeRef = useRef(ambientVolume)
   const kbCollectionIdsRef = useRef(kbCollectionIds)
+  const firstMessageRef = useRef(firstMessage)
 
+  useEffect(() => { firstMessageRef.current = firstMessage }, [firstMessage])
   useEffect(() => { systemPromptRef.current = systemPrompt }, [systemPrompt])
   useEffect(() => { languageRef.current = language }, [language])
   useEffect(() => { voiceRef.current = voice }, [voice])
@@ -115,10 +120,10 @@ export default function useGeminiVoice(
     })
   }
 
-  function appendToolEvent(name: string, args: Record<string, unknown>, toolStatus: string | null) {
+  function appendToolEvent(name: string, args: Record<string, unknown>, toolStatus: string | null, toolResult?: unknown, toolRequest?: GeminiTranscriptEntry['toolRequest']) {
     setTranscript((prev: GeminiTranscriptEntry[]) => [
       ...prev,
-      { role: 'tool' as const, text: '', toolName: name, toolArgs: args, toolStatus, id: ++transcriptIdRef.current },
+      { role: 'tool' as const, text: '', toolName: name, toolArgs: args, toolStatus, toolResult, toolRequest, id: ++transcriptIdRef.current },
     ])
   }
 
@@ -170,6 +175,7 @@ export default function useGeminiVoice(
       ws.send(JSON.stringify({
         type: 'config',
         system_prompt: systemPromptRef.current,
+        first_message: firstMessageRef.current,
         language: languageRef.current,
         voice: voiceRef.current,
         tool_ids: toolIdsRef.current,
@@ -207,6 +213,8 @@ export default function useGeminiVoice(
             msg.name as string,
             (msg.args as Record<string, unknown>) || {},
             (msg.status as string | null) ?? null,
+            msg.result,
+            (msg.request as GeminiTranscriptEntry['toolRequest']) ?? null,
           )
           break
         case 'metric':

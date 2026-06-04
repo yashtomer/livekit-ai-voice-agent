@@ -31,6 +31,33 @@ const TALKINGHEAD_URL =
   'https://cdn.jsdelivr.net/gh/met4citizen/TalkingHead@1.7/modules/talkinghead.mjs'
 
 /**
+ * Minimal typing for the TalkingHead instance — the library ships no TS types, so we
+ * describe only the surface we actually touch: streaming playback, avatar/camera
+ * control, and the morph-target map our energy-based lip-sync writes into.
+ */
+interface TalkingHeadMorph {
+  realtime: number | null
+  needsUpdate: boolean
+}
+interface TalkingHead {
+  start(): void
+  stop(): void
+  showAvatar(opts: Record<string, unknown>): Promise<void>
+  setView(view: CameraView): void
+  streamStart(opts: Record<string, unknown>): Promise<void>
+  streamStop(): void
+  streamAudio(chunk: { audio: ArrayBuffer }): void
+  streamInterrupt?(): void
+  isStreaming?: boolean
+  isSpeaking?: boolean
+  audioAnalyzerNode?: AnalyserNode
+  mtAvatar?: Record<string, TalkingHeadMorph | undefined>
+}
+type TalkingHeadModule = {
+  TalkingHead: new (node: HTMLElement, opt?: Record<string, unknown>) => TalkingHead
+}
+
+/**
  * Selectable avatars — TalkingHead's official demo avatars, bundled in its repo and
  * served LOCALLY from /public (the original models.readyplayer.me URL now returns
  * NXDOMAIN, so we never reach a model CDN). Each carries the Oculus/ARKit visemes our
@@ -42,8 +69,7 @@ export interface AvatarChoice {
   id: string
   label: string
   url: string
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  opts: Record<string, any>
+  opts: Record<string, unknown>
 }
 
 export const AVATARS: AvatarChoice[] = [
@@ -97,8 +123,7 @@ export const DEFAULT_CAMERA_VIEW: CameraView = 'mid'
 
 // Resolve a URL to its full showAvatar() descriptor (falls back to a plain RPM-style
 // descriptor for custom/env URLs not in the preset list).
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-function resolveAvatarOpts(url: string): Record<string, any> {
+function resolveAvatarOpts(url: string): Record<string, unknown> {
   const found = AVATARS.find(a => a.url === url)
   return found ? found.opts : { url, body: 'F', avatarMood: 'neutral' }
 }
@@ -146,9 +171,7 @@ export default function GeminiAvatar({
   mood = null,
 }: GeminiAvatarProps) {
   const containerRef = useRef<HTMLDivElement>(null)
-  // TalkingHead has no published TS types; treat the instance as opaque.
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const headRef = useRef<any>(null)
+  const headRef = useRef<TalkingHead | null>(null)
   const readyRef = useRef(false)
   const streamingRef = useRef(false)
   const inCallRef = useRef(inCall)
@@ -201,8 +224,7 @@ export default function GeminiAvatar({
   const startLipLoop = () => {
     // Write a morph through the `realtime` channel (instant, no easing). Passing null
     // releases it so idle animation / baseline resumes (mouth fully closes).
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const setRT = (head: any, mt: string, v: number | null) => {
+    const setRT = (head: TalkingHead, mt: string, v: number | null) => {
       const o = head.mtAvatar?.[mt]
       if (o) { o.realtime = v; o.needsUpdate = true }
     }
@@ -213,7 +235,7 @@ export default function GeminiAvatar({
       rafRef.current = requestAnimationFrame(loop)
       const head = headRef.current
       if (!head || swappingRef.current) return
-      const analyser = head.audioAnalyzerNode as AnalyserNode | undefined
+      const analyser = head.audioAnalyzerNode
 
       let rms = 0
       let centroid = 0.5
@@ -264,7 +286,7 @@ export default function GeminiAvatar({
     let disposed = false
 
     const init = async () => {
-      let mod: { TalkingHead: new (node: HTMLElement, opt?: Record<string, unknown>) => unknown }
+      let mod: TalkingHeadModule
       try {
         mod = await import(/* @vite-ignore */ TALKINGHEAD_URL)
       } catch (err) {
@@ -273,8 +295,7 @@ export default function GeminiAvatar({
       }
       if (disposed || !containerRef.current) return
 
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const head: any = new (mod.TalkingHead as any)(containerRef.current, {
+      const head = new mod.TalkingHead(containerRef.current, {
         ttsEndpoint: null,        // we never use TalkingHead's TTS
         lipsyncModules: [],       // no text→viseme; we drive the mouth from audio
         cameraView: cameraViewRef.current, // initial framing (see CAMERA_VIEWS)

@@ -22,7 +22,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ...db import get_db
 from ..models.tool import GeminiTool
-from ..services.tools_runtime import dispatch_tool_call
+from ..services.tools_runtime import AVAILABLE_VARIABLES, dispatch_tool_call
 
 router = APIRouter()
 
@@ -34,6 +34,18 @@ class ToolParam(BaseModel):
     type: constr(strip_whitespace=True, max_length=16) = "string"
     required: bool = False
     description: constr(strip_whitespace=True, max_length=500) = ""
+    # How the value for this parameter is sourced at call time:
+    #   "llm_prompt"       — the model fills it (it may ask the caller). The
+    #                        `description` is the instruction shown to the LLM.
+    #                        This is the only kind exposed in the Gemini schema.
+    #   "constant"         — fixed `constant_value` (may contain {{variables}}).
+    #   "dynamic_variable" — pulled from call context, e.g. `dynamic_variable="caller_id"`.
+    value_type: constr(strip_whitespace=True, max_length=24) = "llm_prompt"
+    constant_value: Optional[str] = None
+    dynamic_variable: Optional[constr(strip_whitespace=True, max_length=64)] = None
+    # Used when a dynamic_variable resolves to empty (e.g. caller_id on a browser
+    # call). May itself contain {{variables}}. Empty = send "".
+    fallback: Optional[str] = None
 
 
 class ToolResponseKey(BaseModel):
@@ -92,6 +104,16 @@ def _serialize(row: GeminiTool) -> dict:
 
 
 # ── Routes ───────────────────────────────────────────────────────────────────
+
+@router.get("/variables")
+async def list_variables():
+    """Catalog of dynamic variables a tool parameter / URL / header can bind to.
+
+    Drives the "Dynamic Variable" picker in the tool builder. `populated=False`
+    means the variable is recognised but currently resolves to an empty string
+    at call time (reserved for a future CRM/contact lookup)."""
+    return {"items": AVAILABLE_VARIABLES}
+
 
 @router.get("/")
 async def list_tools(db: AsyncSession = Depends(get_db)):

@@ -147,6 +147,7 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
 
     # Receive initial config message
     system_prompt = DEFAULT_SYSTEM_PROMPT
+    first_message: str | None = None
     language = "en"
     voice = "Aoede"
     tool_ids: list[int] = []
@@ -161,6 +162,7 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
             cfg = json.loads(raw)
             if cfg.get("type") == "config":
                 system_prompt = cfg.get("system_prompt", "").strip() or DEFAULT_SYSTEM_PROMPT
+                first_message = (cfg.get("first_message") or "").strip() or None
                 language = cfg.get("language", "en").strip()
                 voice = cfg.get("voice", "Aoede").strip() or "Aoede"
                 raw_ids = cfg.get("tool_ids") or []
@@ -202,7 +204,7 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
             return
 
     # Resolve the agent's tools (if any)
-    from ..services.tools_runtime import build_gemini_tools, dispatch_tool_call as _dispatch
+    from ..services.tools_runtime import build_call_context, build_gemini_tools, dispatch_tool_call as _dispatch, render_template
     gemini_tools = await build_gemini_tools(tool_ids, kb_collection_ids)
 
     call_id = await start_call(
@@ -236,6 +238,24 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
                 ) as session:
                     if reconnect_count:
                         log.info("Gemini Live reconnected (attempt %d)", reconnect_count)
+
+                    # Greeting: speak the configured first message on the initial
+                    # connect only (not on silent reconnects).
+                    if first_message and reconnect_count == 0:
+                        greeting = render_template(first_message, build_call_context(conversation_id=call_id))
+                        try:
+                            await session.send_client_content(
+                                turns=types.Content(role="user", parts=[types.Part(
+                                    text=(
+                                        "[system] The call just connected. Begin now by saying the "
+                                        "following greeting verbatim, then stop and wait for the caller:\n"
+                                        f"\"{greeting}\""
+                                    )
+                                )]),
+                                turn_complete=True,
+                            )
+                        except Exception:
+                            log.exception("Failed to send greeting")
 
                     async def frontend_to_gemini():
                         nonlocal client_closed
@@ -294,16 +314,24 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
                                         tool_responses = []
                                         for fc in tc.function_calls:
                                             args = dict(fc.args or {})
-                                            result = await _dispatch(tool_ids, fc.name, args, kb_collection_ids=kb_collection_ids)
+                                            tool_meta: dict = {}
+                                            result = await _dispatch(
+                                                tool_ids, fc.name, args,
+                                                kb_collection_ids=kb_collection_ids,
+                                                context=build_call_context(conversation_id=call_id),
+                                                meta_out=tool_meta,
+                                            )
                                             log.info("🔧 tool %s(%s) → %s", fc.name, args, result)
                                             # Surface the tool call in the live UI timeline and persist it.
                                             await _send(websocket, {
                                                 "type": "tool",
                                                 "name": fc.name,
                                                 "args": args,
+                                                "request": tool_meta or None,
                                                 "status": (result or {}).get("status") if isinstance(result, dict) else None,
+                                                "result": result,
                                             })
-                                            await add_tool_event(call_id, fc.name, args, result)
+                                            await add_tool_event(call_id, fc.name, args, result, request=tool_meta or None)
                                             tool_responses.append(
                                                 types.FunctionResponse(id=fc.id, name=fc.name, response=result)
                                             )

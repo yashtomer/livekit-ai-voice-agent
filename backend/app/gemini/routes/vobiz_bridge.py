@@ -36,7 +36,7 @@ from ...models.user import User
 from ...routes.auth import get_current_user
 from ..services.logger import start_call, add_transcript, add_tool_event, end_call
 from ..services.agents_store import get_default_phone_agent
-from ..services.tools_runtime import build_gemini_tools, dispatch_tool_call
+from ..services.tools_runtime import build_call_context, build_gemini_tools, dispatch_tool_call, render_template
 from ..services.transfer import vobiz_transfer, resolve_transfer_number
 from ..agents import DEFAULT_PHONE_AGENT
 from ..ambience import AmbientMixer
@@ -52,6 +52,15 @@ PHONE_LANGUAGE     = os.environ.get("PHONE_LANGUAGE", "en")
 VOBIZ_AUTH_ID      = os.environ.get("VOBIZ_AUTH_ID", "").strip()
 VOBIZ_AUTH_TOKEN   = os.environ.get("VOBIZ_AUTH_TOKEN", "").strip()
 VOBIZ_PHONE_NUMBER = os.environ.get("VOBIZ_PHONE_NUMBER", "").strip()
+
+# Public base URL handed to Vobiz for the answer / hangup / stream webhooks.
+# Vobiz's servers call these, so it must be the public URL (e.g.
+# https://api-aivoice.aeologic.in), not the inbound request host.
+VITE_BACKEND_URL = os.environ.get("VITE_BACKEND_URL", "").strip().rstrip("/")
+# Same base as a WebSocket URL (https → wss) for the bidirectional media stream.
+VITE_BACKEND_WS_URL = VITE_BACKEND_URL.replace("https://", "wss://").replace("http://", "ws://")
+# Bare host[:port] — used where only the host is needed (transfer answer URL).
+VITE_BACKEND_HOST = VITE_BACKEND_URL.split("://")[-1]
 
 MODEL = os.environ.get("GEMINI_LIVE_MODEL", "gemini-2.0-flash-live-001")
 API_VERSION = os.environ.get("GEMINI_API_VERSION", "v1beta")
@@ -132,6 +141,7 @@ def _gc_call_configs() -> None:
 class OutboundCallRequest(BaseModel):
     to: str  # E.164, e.g. "+919876543210"
     system_prompt: str | None = None  # optional: override default agent prompt
+    first_message: str | None = None  # optional: greeting spoken on connect
     language: str | None = None       # optional: override PHONE_LANGUAGE
     voice: str | None = None          # optional: override default voice
     tool_ids: list[int] | None = None  # optional: tools to expose to the agent
@@ -162,6 +172,7 @@ async def make_outbound_call(
     cfg_id = uuid.uuid4().hex[:12]
     CALL_CONFIGS[cfg_id] = {
         "system_prompt":     (req.system_prompt or "").strip() or PHONE_SYSTEM_PROMPT,
+        "first_message":     (req.first_message or "").strip() or None,
         "language":          (req.language or "").strip() or PHONE_LANGUAGE,
         "voice":             (req.voice or "").strip() or "Aoede",
         "tool_ids":          list(req.tool_ids or []),
@@ -174,11 +185,9 @@ async def make_outbound_call(
         "_ts":               datetime.utcnow().timestamp(),
     }
 
-    host = request.url.hostname
     url = f"https://api.vobiz.ai/api/v1/Account/{VOBIZ_AUTH_ID}/Call/"
-    answer_url = f"https://{host}/api/vobiz/voice?cfg={cfg_id}"
-    hangup_url = f"https://{host}/api/vobiz/status"
-
+    answer_url = f"{VITE_BACKEND_URL}/api/vobiz/voice?cfg={cfg_id}"
+    hangup_url = f"{VITE_BACKEND_URL}/api/vobiz/status"
     payload = {
         "from": VOBIZ_PHONE_NUMBER.lstrip("+"),
         "to":   req.to.lstrip("+"),
@@ -216,9 +225,8 @@ async def make_outbound_call(
 async def voice_webhook(request: Request):
     """Vobiz hits this when a call comes in. Returns XML telling Vobiz to
     open a bidirectional WebSocket to our /stream endpoint."""
-    host = _public_host(request.url.hostname)
     cfg = request.query_params.get("cfg", "")
-    ws_url = f"wss://{host}/api/vobiz/stream"
+    ws_url = f"{VITE_BACKEND_WS_URL}/api/vobiz/stream"
     if cfg:
         ws_url += f"?cfg={cfg}"
     log.info("/api/vobiz/voice → stream %s", ws_url)
@@ -302,6 +310,7 @@ async def vobiz_stream(ws: WebSocket):
     call_cfg = CALL_CONFIGS.pop(cfg_id, None) if cfg_id else None
     if call_cfg:
         call_prompt   = call_cfg["system_prompt"]
+        call_first_message = call_cfg.get("first_message") or None
         call_language = call_cfg["language"]
         call_voice    = call_cfg["voice"]
         call_tool_ids = list(call_cfg.get("tool_ids") or [])
@@ -314,6 +323,7 @@ async def vobiz_stream(ws: WebSocket):
     else:
         _agent = await get_default_phone_agent()
         call_prompt   = _agent.system_prompt if _agent else PHONE_SYSTEM_PROMPT
+        call_first_message = getattr(_agent, "first_message", None) if _agent else None
         call_language = _agent.language      if _agent else PHONE_LANGUAGE
         call_voice    = _agent.voice         if _agent else "Aoede"
         call_tool_ids = list(_agent.tool_ids or []) if _agent else []
@@ -376,6 +386,25 @@ async def vobiz_stream(ws: WebSocket):
             model=MODEL,
             config=_make_live_config(call_prompt, call_language, call_voice, tools=call_tools),
         ) as session:
+
+            # Greeting: have the agent speak the configured first message on connect.
+            if call_first_message:
+                greeting = render_template(call_first_message, build_call_context(
+                    caller_id=to_number, call_sid=call_id or stream_id, conversation_id=log_id,
+                ))
+                try:
+                    await session.send_client_content(
+                        turns=types.Content(role="user", parts=[types.Part(
+                            text=(
+                                "[system] The call just connected. Begin now by saying the "
+                                "following greeting verbatim, then stop and wait for the caller:\n"
+                                f"\"{greeting}\""
+                            )
+                        )]),
+                        turn_complete=True,
+                    )
+                except Exception:
+                    log.exception("Failed to send greeting")
 
             async def vobiz_to_gemini():
                 nonlocal in_state
@@ -474,17 +503,27 @@ async def vobiz_stream(ws: WebSocket):
                                 tool_responses = []
                                 for fc in tc.function_calls:
                                     _args = dict(fc.args or {})
+                                    tool_meta: dict = {}
                                     if fc.name == "transfer_call":
                                         result = await vobiz_transfer(
                                             call_id,
                                             resolve_transfer_number((call_cfg or {}).get("transfer_number")),
-                                            _public_host(ws.url.hostname or ""),
+                                            VITE_BACKEND_HOST,
                                             str(_args.get("reason") or ""),
                                         )
                                     else:
-                                        result = await dispatch_tool_call(call_tool_ids, fc.name, _args, kb_collection_ids=call_kb_ids)
+                                        result = await dispatch_tool_call(
+                                            call_tool_ids, fc.name, _args,
+                                            kb_collection_ids=call_kb_ids,
+                                            context=build_call_context(
+                                                caller_id=to_number,
+                                                call_sid=call_id or stream_id,
+                                                conversation_id=log_id,
+                                            ),
+                                            meta_out=tool_meta,
+                                        )
                                     log.info("🔧 tool %s(%s) → %s", fc.name, _args, result)
-                                    await add_tool_event(log_id, fc.name, _args, result)
+                                    await add_tool_event(log_id, fc.name, _args, result, request=tool_meta or None)
                                     tool_responses.append(
                                         gtypes.FunctionResponse(
                                             id=fc.id,
