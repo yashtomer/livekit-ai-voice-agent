@@ -210,10 +210,15 @@ async def make_outbound_call(
     follow TATA's documented click_to_call API; override TATA_CTC_URL / the body
     fields to match your account if the call doesn't place.
     """
-    missing = [n for n, v in [
-        ("TATA_AUTH_TOKEN", TATA_AUTH_TOKEN),
-        ("TATA_CALLER_ID", TATA_CALLER_ID),
-    ] if not v]
+    # A single DID can serve as both legs: the streaming agent AND the caller-id
+    # shown to the customer. Require the auth token plus at least one number.
+    agent_no  = TATA_AGENT_NUMBER or TATA_CALLER_ID
+    caller_no = TATA_CALLER_ID or TATA_AGENT_NUMBER
+    missing = []
+    if not TATA_AUTH_TOKEN:
+        missing.append("TATA_AUTH_TOKEN")
+    if not (agent_no and caller_no):
+        missing.append("TATA_AGENT_NUMBER or TATA_CALLER_ID")
     if missing:
         raise HTTPException(500, f"Missing env vars: {', '.join(missing)}")
 
@@ -233,18 +238,24 @@ async def make_outbound_call(
         "_ts":               datetime.utcnow().timestamp(),
     }
 
-    # TATA Click-to-Call: connect the customer (destination) to the streaming DID.
+    # TATA Click-to-Call (Smartflo /v1/click_to_call). Two legs: TATA first rings
+    # `agent_number` (must be the Voice-Streaming agent/DID so OUR bridge picks up),
+    # then dials `destination_number` (the customer) and bridges them. `async=1`
+    # means don't wait for the agent leg to be answered before dialing out.
+    # Ref: https://docs.smartflo.tatatelebusiness.com/reference/v1click_to_call
     payload = {
-        "agent_number":       TATA_AGENT_NUMBER or TATA_CALLER_ID,
+        "agent_number":       agent_no,
         "destination_number": req.to,
-        "caller_id":          TATA_CALLER_ID,
+        "caller_id":          caller_no,
+        "async":              1,
+        "call_timeout":       600,
     }
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 TATA_CTC_URL,
                 json=payload,
-                headers={"Authorization": f"Bearer {TATA_AUTH_TOKEN}"},
+                headers={"Authorization": TATA_AUTH_TOKEN},
             ) as resp:
                 body = await resp.text()
                 log.info("TATA click_to_call → %s %s", resp.status, body[:300])
@@ -270,13 +281,14 @@ async def tata_config(request: Request):
         "stream_ws_url": f"{host}/api/tata/stream",
         "instructions": "Paste stream_ws_url into TATA Voice Streaming → Add an Endpoint, "
                         "then assign the endpoint to your phone number.",
-        "outbound_enabled": bool(TATA_AUTH_TOKEN and TATA_CALLER_ID),
+        "outbound_enabled": bool(TATA_AUTH_TOKEN and (TATA_CALLER_ID or TATA_AGENT_NUMBER)),
         "transfer_enabled": bool(TATA_AUTH_TOKEN and TATA_TRANSFER_CODE),
         "transfer_code": TATA_TRANSFER_CODE or None,
+        "outbound_number": TATA_CALLER_ID or TATA_AGENT_NUMBER or None,
         "missing_env": [n for n, v in [
             ("VITE_BACKEND_URL", VITE_BACKEND_URL),
             ("TATA_AUTH_TOKEN", TATA_AUTH_TOKEN),
-            ("TATA_CALLER_ID", TATA_CALLER_ID),
+            ("TATA_CALLER_ID or TATA_AGENT_NUMBER", TATA_CALLER_ID or TATA_AGENT_NUMBER),
         ] if not v],
     })
 
@@ -425,9 +437,15 @@ async def tata_stream(ws: WebSocket):
 
     client_closed = False
     reconnect_count = 0
+    # Consecutive Gemini server errors (503 high-demand / UNAVAILABLE) with no
+    # productive session in between. Reset whenever a session yields audio, so a
+    # transient blip recovers but a sustained outage ends the call gracefully.
+    server_error_streak = 0
+    MAX_SERVER_ERROR_STREAK = 6
 
     try:
         while not client_closed:
+            productive_box = {"hit": False}
             try:
                 async with client.aio.live.connect(
                     model=MODEL,
@@ -595,6 +613,7 @@ async def tata_stream(ws: WebSocket):
                                         out_buf.clear()
                                         await ws.send_text(json.dumps({"event": "clear", "streamSid": stream_sid}))
                                     if response.data and stream_sid:
+                                        productive_box["hit"] = True
                                         await _stop_filler()
                                         await _send_mixed(always_mixer.mix(response.data))
                                     if sc and sc.input_transcription and sc.input_transcription.text:
@@ -625,6 +644,11 @@ async def tata_stream(ws: WebSocket):
                         if exc and not isinstance(exc, WebSocketDisconnect):
                             raise exc
 
+                # A session that produced audio means Gemini is healthy again —
+                # clear any accumulated server-error streak.
+                if productive_box["hit"]:
+                    server_error_streak = 0
+
                 if transfer_state["active"] or client_closed:
                     break
 
@@ -632,11 +656,35 @@ async def tata_stream(ws: WebSocket):
                 client_closed = True
                 break
             except Exception as exc:
-                # Preview Live models drop with 1006/1011 roughly every turn —
-                # silently re-open the Gemini session without closing TATA.
                 code = getattr(exc, "code", None)
                 msg_s = str(exc)
                 exc_type = type(exc).__name__
+
+                # Transient Gemini server overload (503 high-demand / UNAVAILABLE /
+                # 500). Back off and retry — but give up after a sustained streak so
+                # we don't loop on dead air through a real outage. Reconnecting opens
+                # a fresh session (conversation context is lost), which is still far
+                # better than dropping the live call on a momentary blip.
+                if (
+                    "ServerError" in exc_type
+                    or code in (500, 503)
+                    or "503" in msg_s or "500" in msg_s
+                    or "UNAVAILABLE" in msg_s or "high demand" in msg_s or "overloaded" in msg_s
+                ):
+                    server_error_streak += 1
+                    if server_error_streak > MAX_SERVER_ERROR_STREAK:
+                        log.error("Gemini unavailable after %d consecutive 503s — ending call",
+                                  server_error_streak)
+                        break
+                    backoff = min(0.5 * server_error_streak, 3.0)
+                    reconnect_count += 1
+                    log.warning("Gemini 503/unavailable (%s) — retry #%d in %.1fs",
+                                msg_s[:80], server_error_streak, backoff)
+                    await asyncio.sleep(backoff)
+                    continue
+
+                # Socket-level drops (preview models drop with 1006/1011 roughly
+                # every turn) — re-open the Gemini session without closing TATA.
                 if (
                     "APIError" in exc_type or "ConnectionClosed" in exc_type
                     or isinstance(exc, (ConnectionResetError, BrokenPipeError))
