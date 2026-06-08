@@ -210,10 +210,15 @@ async def make_outbound_call(
     follow TATA's documented click_to_call API; override TATA_CTC_URL / the body
     fields to match your account if the call doesn't place.
     """
-    missing = [n for n, v in [
-        ("TATA_AUTH_TOKEN", TATA_AUTH_TOKEN),
-        ("TATA_CALLER_ID", TATA_CALLER_ID),
-    ] if not v]
+    # A single DID can serve as both legs: the streaming agent AND the caller-id
+    # shown to the customer. Require the auth token plus at least one number.
+    agent_no  = TATA_AGENT_NUMBER or TATA_CALLER_ID
+    caller_no = TATA_CALLER_ID or TATA_AGENT_NUMBER
+    missing = []
+    if not TATA_AUTH_TOKEN:
+        missing.append("TATA_AUTH_TOKEN")
+    if not (agent_no and caller_no):
+        missing.append("TATA_AGENT_NUMBER or TATA_CALLER_ID")
     if missing:
         raise HTTPException(500, f"Missing env vars: {', '.join(missing)}")
 
@@ -233,18 +238,24 @@ async def make_outbound_call(
         "_ts":               datetime.utcnow().timestamp(),
     }
 
-    # TATA Click-to-Call: connect the customer (destination) to the streaming DID.
+    # TATA Click-to-Call (Smartflo /v1/click_to_call). Two legs: TATA first rings
+    # `agent_number` (must be the Voice-Streaming agent/DID so OUR bridge picks up),
+    # then dials `destination_number` (the customer) and bridges them. `async=1`
+    # means don't wait for the agent leg to be answered before dialing out.
+    # Ref: https://docs.smartflo.tatatelebusiness.com/reference/v1click_to_call
     payload = {
-        "agent_number":       TATA_AGENT_NUMBER or TATA_CALLER_ID,
+        "agent_number":       agent_no,
         "destination_number": req.to,
-        "caller_id":          TATA_CALLER_ID,
+        "caller_id":          caller_no,
+        "async":              1,
+        "call_timeout":       600,
     }
     try:
         async with aiohttp.ClientSession() as session:
             async with session.post(
                 TATA_CTC_URL,
                 json=payload,
-                headers={"Authorization": f"Bearer {TATA_AUTH_TOKEN}"},
+                headers={"Authorization": TATA_AUTH_TOKEN},
             ) as resp:
                 body = await resp.text()
                 log.info("TATA click_to_call → %s %s", resp.status, body[:300])
@@ -270,13 +281,14 @@ async def tata_config(request: Request):
         "stream_ws_url": f"{host}/api/tata/stream",
         "instructions": "Paste stream_ws_url into TATA Voice Streaming → Add an Endpoint, "
                         "then assign the endpoint to your phone number.",
-        "outbound_enabled": bool(TATA_AUTH_TOKEN and TATA_CALLER_ID),
+        "outbound_enabled": bool(TATA_AUTH_TOKEN and (TATA_CALLER_ID or TATA_AGENT_NUMBER)),
         "transfer_enabled": bool(TATA_AUTH_TOKEN and TATA_TRANSFER_CODE),
         "transfer_code": TATA_TRANSFER_CODE or None,
+        "outbound_number": TATA_CALLER_ID or TATA_AGENT_NUMBER or None,
         "missing_env": [n for n, v in [
             ("VITE_BACKEND_URL", VITE_BACKEND_URL),
             ("TATA_AUTH_TOKEN", TATA_AUTH_TOKEN),
-            ("TATA_CALLER_ID", TATA_CALLER_ID),
+            ("TATA_CALLER_ID or TATA_AGENT_NUMBER", TATA_CALLER_ID or TATA_AGENT_NUMBER),
         ] if not v],
     })
 

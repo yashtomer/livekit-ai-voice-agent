@@ -656,7 +656,22 @@ function OutboundDialer() {
     const token = localStorage.getItem('access_token') || ''
     setBusy(true)
     try {
-      const res = await fetch(`${backendUrl}/api/vobiz/call`, {
+      // ── Vobiz outbound (disabled — switched to TATA) ──────────────────────
+      // const res = await fetch(`${backendUrl}/api/vobiz/call`, {
+      //   method: 'POST',
+      //   headers: {
+      //     'Content-Type': 'application/json',
+      //     ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      //   },
+      //   body: JSON.stringify({
+      //     to, system_prompt: systemPrompt, first_message: firstMessage, language, voice, tool_ids: toolIds,
+      //     kb_collection_ids: kbCollectionIds,
+      //     ambient_always: ambientAlways, ambient_tool_call: ambientToolCall, ambient_volume: ambientVolume,
+      //   }),
+      // })
+
+      // ── TATA outbound (Click-to-Call) ────────────────────────────────────
+      const res = await fetch(`${backendUrl}/api/tata/call`, {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
@@ -690,7 +705,7 @@ function OutboundDialer() {
         </div>
         <h2 className="text-lg font-bold text-foreground">Outbound Call</h2>
         <p className="text-sm text-muted-foreground mt-1">
-          Place a Vobiz call to any Indian number. The agent calls them and speaks via Gemini Live.
+          Place a TATA call to any Indian number. The agent dials them and speaks via Gemini Live.
         </p>
       </div>
 
