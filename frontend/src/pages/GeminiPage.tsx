@@ -118,22 +118,53 @@ function ToolChip({ name, args, status, result, request }: {
   )
 }
 
-/** A single chat message bubble (user = red/primary, model = grey). */
+/** Join two transcript fragments with correct spacing (no space before
+ *  punctuation; works for both Latin and Devanagari scripts). */
+function joinFragment(a: string, b: string): string {
+  const left = (a || '').replace(/\s+$/, '')
+  const right = (b || '').replace(/^\s+/, '')
+  if (!left) return right
+  if (!right) return left
+  if (/^[,.!?।:;%)\]}'"]/.test(right)) return left + right
+  return left + ' ' + right
+}
+
+/** Gemini Live streams the agent's (and caller's) speech as many word-level
+ *  transcription events; the phone bridges log each as its own turn. Merge
+ *  consecutive same-speaker text turns back into a single bubble so a sentence
+ *  reads as one message instead of one-word fragments. Tool turns break a run. */
+function coalesceTranscript(turns: TranscriptItem[]): TranscriptItem[] {
+  const out: TranscriptItem[] = []
+  for (const t of turns) {
+    const prev = out[out.length - 1]
+    if ((t.role === 'user' || t.role === 'model') && prev && prev.role === t.role) {
+      prev.text = joinFragment(prev.text || '', t.text || '')
+    } else {
+      out.push({ ...t })
+    }
+  }
+  return out
+}
+
+/** A single chat message bubble (caller = brand accent, agent = clean card). */
 function ChatBubble({ role, text }: { role: 'user' | 'model'; text: string }) {
   const isUser = role === 'user'
   return (
-    <div className={`flex gap-2 ${isUser ? 'flex-row-reverse' : ''}`}>
-      <div className={`flex-shrink-0 w-7 h-7 rounded-full flex items-center justify-center ${
-        isUser ? 'bg-primary text-primary-foreground' : 'bg-muted border border-border text-muted-foreground'
+    <div className={`flex gap-3 ${isUser ? 'flex-row-reverse' : ''}`}>
+      <div className={`flex-shrink-0 w-8 h-8 rounded-xl flex items-center justify-center mt-5 ${
+        isUser ? 'bg-muted border border-border text-muted-foreground' : 'bg-primary/10 text-primary'
       }`}>
-        {isUser ? <Mic className="w-3.5 h-3.5" /> : <Bot className="w-3.5 h-3.5" />}
+        {isUser ? <Mic className="w-4 h-4" /> : <Bot className="w-4 h-4" />}
       </div>
-      <div className={`w-[80%] min-w-0 px-3.5 py-2 rounded-2xl text-sm leading-relaxed shadow-sm break-words ${
-        isUser
-          ? 'bg-primary text-primary-foreground rounded-tr-sm'
-          : 'bg-muted border border-border text-foreground rounded-tl-sm'
-      }`}>
-        {text}
+      <div className={`flex flex-col gap-1 min-w-0 max-w-[86%] ${isUser ? 'items-end' : 'items-start'}`}>
+        <span className="text-[11px] font-medium text-muted-foreground px-1">{isUser ? 'Caller' : 'Agent'}</span>
+        <div className={`px-4 py-2.5 text-sm leading-relaxed break-words shadow-sm ${
+          isUser
+            ? 'bg-primary text-primary-foreground rounded-2xl rounded-tr-md'
+            : 'bg-card border border-border text-foreground rounded-2xl rounded-tl-md'
+        }`}>
+          {text}
+        </div>
       </div>
     </div>
   )
@@ -831,38 +862,55 @@ function StatCard({ icon: Icon, label, value, sub, color }: {
   icon: ComponentType<{ className?: string }>; label: string; value: string; sub?: string; color: string
 }) {
   return (
-    <div className="card flex items-center gap-3 p-4">
+    <div className="rounded-2xl border border-border/70 bg-card p-5 flex items-start justify-between gap-3 transition-all hover:shadow-sm hover:border-border">
+      <div className="min-w-0">
+        <p className="text-[11px] uppercase tracking-wider font-semibold text-muted-foreground">{label}</p>
+        <p className="text-[28px] font-bold text-foreground leading-none mt-2 tabular-nums">{value}</p>
+        {sub && <p className="text-xs text-muted-foreground mt-1.5">{sub}</p>}
+      </div>
       <div className={`w-10 h-10 rounded-xl flex items-center justify-center flex-shrink-0 ${color}`}>
         <Icon className="w-5 h-5" />
-      </div>
-      <div className="min-w-0">
-        <p className="text-[11px] uppercase tracking-wide font-semibold text-muted-foreground">{label}</p>
-        <p className="text-xl font-bold text-foreground leading-tight">{value}</p>
-        {sub && <p className="text-[11px] text-muted-foreground">{sub}</p>}
       </div>
     </div>
   )
 }
 
 /** Horizontal bar list — used for breakdowns by type/language/tool. */
-function BarList({ title, data, labelMap }: {
-  title: string; data: { key: string; count: number }[]; labelMap?: Record<string, string>
+const BARLIST_ACCENTS: Record<string, string> = {
+  primary: 'bg-primary',
+  blue: 'bg-blue-500',
+  violet: 'bg-violet-500',
+  emerald: 'bg-emerald-500',
+}
+function BarList({ title, data, labelMap, accent = 'primary' }: {
+  title: string; data: { key: string; count: number }[]; labelMap?: Record<string, string>; accent?: string
 }) {
   const max = Math.max(1, ...data.map(d => d.count))
+  const total = data.reduce((s, d) => s + d.count, 0)
+  const bar = BARLIST_ACCENTS[accent] || BARLIST_ACCENTS.primary
   return (
-    <div className="card flex flex-col gap-3 p-4">
-      <h3 className="text-sm font-bold text-foreground uppercase tracking-wide">{title}</h3>
+    <div className="rounded-2xl border border-border/70 bg-card p-5">
+      <div className="flex items-center justify-between mb-4">
+        <h3 className="text-sm font-semibold text-foreground">{title}</h3>
+        {total > 0 && <span className="text-xs font-medium text-muted-foreground tabular-nums">{total}</span>}
+      </div>
       {data.length === 0 ? (
         <p className="text-xs text-muted-foreground py-2">No data yet.</p>
-      ) : data.map(d => (
-        <div key={d.key} className="flex items-center gap-2">
-          <span className="text-xs text-foreground w-28 truncate capitalize">{labelMap?.[d.key] || d.key}</span>
-          <div className="flex-1 h-2.5 bg-muted rounded-full overflow-hidden">
-            <div className="h-full bg-primary rounded-full" style={{ width: `${(d.count / max) * 100}%` }} />
-          </div>
-          <span className="text-xs font-mono text-muted-foreground w-8 text-right">{d.count}</span>
+      ) : (
+        <div className="flex flex-col gap-3.5">
+          {data.map(d => (
+            <div key={d.key} className="space-y-1.5">
+              <div className="flex items-center justify-between text-xs gap-2">
+                <span className="text-foreground/90 truncate capitalize">{labelMap?.[d.key] || d.key}</span>
+                <span className="font-semibold text-muted-foreground tabular-nums flex-shrink-0">{d.count}</span>
+              </div>
+              <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+                <div className={`h-full ${bar} rounded-full transition-all duration-500`} style={{ width: `${(d.count / max) * 100}%` }} />
+              </div>
+            </div>
+          ))}
         </div>
-      ))}
+      )}
     </div>
   )
 }
@@ -895,15 +943,15 @@ function AnalyticsView() {
   const dayMax = Math.max(1, ...(stats?.calls_by_day || []).map(d => d.count))
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 p-6 gap-4 overflow-y-auto">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-bold text-foreground">Analytics</h1>
+    <div className="flex-1 flex flex-col min-h-0 p-6 gap-5 overflow-y-auto">
+      <div className="flex items-end justify-between flex-wrap gap-3">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-bold tracking-tight text-foreground">Analytics</h1>
           <p className="text-sm text-muted-foreground">Aggregate insights across all Gemini Live calls</p>
         </div>
         <button
           onClick={load}
-          className="flex items-center gap-2 px-3 py-1.5 text-sm rounded-lg border border-border bg-background hover:bg-muted transition-all"
+          className="flex items-center gap-2 px-3.5 py-2 text-sm font-medium rounded-lg border border-border bg-card hover:bg-muted transition-all"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
           Refresh
@@ -919,7 +967,7 @@ function AnalyticsView() {
       ) : (
         <>
           {/* Top stat cards */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
             <StatCard icon={ListVideo} label="Total Calls" value={String(stats.total_calls)}
               sub={`${stats.ended_calls} ended · ${stats.active_calls} active`} color="bg-blue-500/10 text-blue-600 dark:text-blue-400" />
             <StatCard icon={Clock} label="Avg Duration" value={formatDuration(stats.avg_duration_s)}
@@ -930,51 +978,74 @@ function AnalyticsView() {
               sub="failed sessions" color="bg-destructive/10 text-destructive" />
           </div>
 
-          {/* Calls per day */}
-          <div className="card flex flex-col gap-3 p-4">
-            <h3 className="text-sm font-bold text-foreground uppercase tracking-wide">Calls per day</h3>
-            {stats.calls_by_day.length === 0 ? (
-              <p className="text-xs text-muted-foreground py-2">No data yet.</p>
-            ) : (
-              <div className="flex items-end gap-1.5 h-32">
-                {stats.calls_by_day.map(d => (
-                  <div key={d.day} className="flex-1 flex flex-col items-center justify-end gap-1 group" title={`${d.day}: ${d.count}`}>
-                    <span className="text-[9px] text-muted-foreground opacity-0 group-hover:opacity-100">{d.count}</span>
-                    <div className="w-full bg-primary/80 rounded-t hover:bg-primary transition-all" style={{ height: `${(d.count / dayMax) * 100}%`, minHeight: 2 }} />
-                    <span className="text-[8px] text-muted-foreground rotate-0 truncate w-full text-center">{d.day.slice(5)}</span>
-                  </div>
-                ))}
+          {/* Calls per day + Sentiment — two cards in one row */}
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            {/* Calls per day */}
+            <div className="rounded-2xl border border-border/70 bg-card p-5">
+              <div className="flex items-center justify-between mb-5">
+                <h3 className="text-sm font-semibold text-foreground">Calls per day</h3>
+                <span className="text-xs font-medium text-muted-foreground tabular-nums">
+                  {stats.calls_by_day.reduce((s, d) => s + d.count, 0)} total
+                </span>
               </div>
-            )}
-          </div>
+              {stats.calls_by_day.length === 0 ? (
+                <p className="text-xs text-muted-foreground py-2">No data yet.</p>
+              ) : (
+                <div className="flex items-end gap-3 h-40">
+                  {stats.calls_by_day.map(d => (
+                    <div key={d.day} className="flex-1 flex flex-col items-center gap-2 h-full group">
+                      <div className="w-full flex-1 flex items-end justify-center">
+                        <div
+                          className="w-full max-w-[34px] bg-primary/85 group-hover:bg-primary rounded-t-md transition-all duration-500"
+                          style={{ height: `${Math.max((d.count / dayMax) * 100, d.count > 0 ? 4 : 0)}%` }}
+                          title={`${d.day}: ${d.count}`}
+                        />
+                      </div>
+                      <span className="text-[11px] font-semibold text-foreground/80 tabular-nums">{d.count}</span>
+                      <span className="text-[10px] text-muted-foreground">{d.day.slice(5)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
 
-          {/* Sentiment breakdown */}
-          <div className="card flex flex-col gap-3 p-4">
-            <h3 className="text-sm font-bold text-foreground uppercase tracking-wide">Sentiment</h3>
-            {sentTotal === 0 ? (
-              <p className="text-xs text-muted-foreground py-2">No analysed calls yet.</p>
-            ) : (
-              <>
-                <div className="flex h-4 rounded-full overflow-hidden">
-                  <div className="bg-green-500" style={{ width: `${(sentiments.positive || 0) / sentTotal * 100}%` }} />
-                  <div className="bg-slate-400" style={{ width: `${(sentiments.neutral || 0) / sentTotal * 100}%` }} />
-                  <div className="bg-destructive" style={{ width: `${(sentiments.negative || 0) / sentTotal * 100}%` }} />
+            {/* Sentiment breakdown */}
+            <div className="rounded-2xl border border-border/70 bg-card p-5 flex flex-col">
+              <h3 className="text-sm font-semibold text-foreground mb-4">Sentiment</h3>
+              {sentTotal === 0 ? (
+                <p className="text-xs text-muted-foreground py-2">No analysed calls yet.</p>
+              ) : (
+                <div className="flex-1 flex flex-col justify-center gap-4">
+                  <div className="flex h-3 rounded-full overflow-hidden gap-0.5">
+                    <div className="bg-green-500 transition-all duration-500" style={{ width: `${(sentiments.positive || 0) / sentTotal * 100}%` }} />
+                    <div className="bg-slate-400 transition-all duration-500" style={{ width: `${(sentiments.neutral || 0) / sentTotal * 100}%` }} />
+                    <div className="bg-destructive transition-all duration-500" style={{ width: `${(sentiments.negative || 0) / sentTotal * 100}%` }} />
+                  </div>
+                  <div className="grid grid-cols-3 gap-2 text-xs">
+                    {([
+                      ['Positive', sentiments.positive || 0, 'bg-green-500'],
+                      ['Neutral', sentiments.neutral || 0, 'bg-slate-400'],
+                      ['Negative', sentiments.negative || 0, 'bg-destructive'],
+                    ] as const).map(([label, val, dot]) => (
+                      <div key={label} className="rounded-lg bg-muted/40 px-3 py-2.5">
+                        <div className="flex items-center gap-1.5 text-muted-foreground">
+                          <span className={`w-2 h-2 rounded-full ${dot}`} /> {label}
+                        </div>
+                        <p className="text-lg font-bold text-foreground tabular-nums mt-1 leading-none">{val}</p>
+                      </div>
+                    ))}
+                  </div>
                 </div>
-                <div className="flex gap-4 text-xs text-muted-foreground">
-                  <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-green-500" /> Positive {sentiments.positive || 0}</span>
-                  <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-slate-400" /> Neutral {sentiments.neutral || 0}</span>
-                  <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-destructive" /> Negative {sentiments.negative || 0}</span>
-                </div>
-              </>
-            )}
+              )}
+            </div>
           </div>
 
           {/* Breakdown grids */}
-          <div className="grid grid-cols-1 lg:grid-cols-2 gap-3">
-            <BarList title="By channel" data={stats.by_type} labelMap={typeMap} />
-            <BarList title="By language" data={stats.by_language} labelMap={langMap} />
-            <BarList title="Top tools called" data={stats.top_tools} />
-            <BarList title="By voice" data={stats.by_voice} />
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <BarList title="By channel" data={stats.by_type} labelMap={typeMap} accent="blue" />
+            <BarList title="By language" data={stats.by_language} labelMap={langMap} accent="violet" />
+            <BarList title="Top tools called" data={stats.top_tools} accent="primary" />
+            <BarList title="By voice" data={stats.by_voice} accent="emerald" />
           </div>
         </>
       )}
@@ -1028,15 +1099,15 @@ function CallsView() {
   }
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 p-6 gap-4">
-      <div className="flex items-center justify-between">
-        <div>
-          <h1 className="text-xl font-bold text-foreground">Calls</h1>
+    <div className="flex-1 flex flex-col min-h-0 p-6 gap-5">
+      <div className="flex items-end justify-between flex-wrap gap-3">
+        <div className="space-y-1">
+          <h1 className="text-2xl font-bold tracking-tight text-foreground">Calls</h1>
           <p className="text-sm text-muted-foreground">History of all Gemini Live calls with transcripts</p>
         </div>
         <button
           onClick={() => load(page)}
-          className="flex items-center gap-2 px-3 py-1.5 text-sm rounded-lg border border-border bg-background hover:bg-muted transition-all"
+          className="flex items-center gap-2 px-3.5 py-2 text-sm font-medium rounded-lg border border-border bg-card hover:bg-muted transition-all"
         >
           <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} />
           Refresh
@@ -1049,20 +1120,20 @@ function CallsView() {
         </div>
       )}
 
-      <div className="card flex-1 min-h-0 overflow-auto p-0">
-        <table className="w-full text-sm">
-          <thead className="sticky top-0 bg-card border-b border-border">
-            <tr className="text-left text-muted-foreground text-xs uppercase tracking-wide">
-              <th className="px-4 py-3 font-semibold">ID</th>
-              <th className="px-4 py-3 font-semibold">Type</th>
-              <th className="px-4 py-3 font-semibold">Direction</th>
-              <th className="px-4 py-3 font-semibold">Phone</th>
-              <th className="px-4 py-3 font-semibold">Started</th>
-              <th className="px-4 py-3 font-semibold">Duration</th>
-              <th className="px-4 py-3 font-semibold">Turns</th>
-              <th className="px-4 py-3 font-semibold">Sentiment</th>
-              <th className="px-4 py-3 font-semibold">Status</th>
-              <th className="px-4 py-3 font-semibold text-right">Actions</th>
+      <div className="rounded-2xl border border-border/70 bg-card flex-1 min-h-0 overflow-auto">
+        <table className="w-full text-sm border-separate border-spacing-0">
+          <thead className="sticky top-0 z-10">
+            <tr className="text-left text-muted-foreground text-[11px] uppercase tracking-wider bg-muted/40 backdrop-blur">
+              <th className="px-4 py-3 font-semibold border-b border-border">ID</th>
+              <th className="px-4 py-3 font-semibold border-b border-border">Type</th>
+              <th className="px-4 py-3 font-semibold border-b border-border">Direction</th>
+              <th className="px-4 py-3 font-semibold border-b border-border">Phone</th>
+              <th className="px-4 py-3 font-semibold border-b border-border">Started</th>
+              <th className="px-4 py-3 font-semibold border-b border-border">Duration</th>
+              <th className="px-4 py-3 font-semibold border-b border-border text-center">Turns</th>
+              <th className="px-4 py-3 font-semibold border-b border-border">Sentiment</th>
+              <th className="px-4 py-3 font-semibold border-b border-border">Status</th>
+              <th className="px-4 py-3 font-semibold border-b border-border text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
@@ -1071,38 +1142,41 @@ function CallsView() {
             ) : items.length === 0 ? (
               <tr><td colSpan={10} className="px-4 py-10 text-center text-muted-foreground">No calls yet.</td></tr>
             ) : items.map(row => (
-              <tr key={row.id} className="border-b border-border/50 hover:bg-muted/30 transition-colors">
-                <td className="px-4 py-3 font-mono text-xs text-muted-foreground">#{row.id}</td>
-                <td className="px-4 py-3">
+              <tr key={row.id} className="hover:bg-muted/30 transition-colors group">
+                <td className="px-4 py-3 font-mono text-xs text-muted-foreground border-b border-border/40">#{row.id}</td>
+                <td className="px-4 py-3 border-b border-border/40">
                   <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-semibold border ${CALL_TYPE_BADGE[row.call_type] || 'bg-muted text-foreground border-border'}`}>
                     {CALL_TYPE_LABEL[row.call_type] || row.call_type}
                   </span>
                 </td>
-                <td className="px-4 py-3 text-muted-foreground capitalize">{row.direction || '—'}</td>
-                <td className="px-4 py-3 font-mono text-xs">{row.phone_number || '—'}</td>
-                <td className="px-4 py-3 text-muted-foreground">{formatDateTime(row.started_at)}</td>
-                <td className="px-4 py-3">{formatDuration(row.duration_s)}</td>
-                <td className="px-4 py-3 text-center">{row.turn_count}</td>
-                <td className="px-4 py-3">
+                <td className="px-4 py-3 text-muted-foreground capitalize border-b border-border/40">{row.direction || '—'}</td>
+                <td className="px-4 py-3 font-mono text-xs border-b border-border/40">{row.phone_number || '—'}</td>
+                <td className="px-4 py-3 text-muted-foreground whitespace-nowrap border-b border-border/40">{formatDateTime(row.started_at)}</td>
+                <td className="px-4 py-3 tabular-nums border-b border-border/40">{formatDuration(row.duration_s)}</td>
+                <td className="px-4 py-3 text-center tabular-nums border-b border-border/40">{row.turn_count}</td>
+                <td className="px-4 py-3 border-b border-border/40">
                   {row.sentiment ? (
                     <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-semibold border capitalize ${SENTIMENT_BADGE[row.sentiment] || SENTIMENT_BADGE.neutral}`}>
                       {row.sentiment}
                     </span>
                   ) : <span className="text-muted-foreground">—</span>}
                 </td>
-                <td className="px-4 py-3">
-                  <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium ${
+                <td className="px-4 py-3 border-b border-border/40">
+                  <span className={`inline-flex items-center gap-1.5 px-2 py-0.5 rounded-md text-xs font-medium ${
                     row.status === 'ended' ? 'bg-green-500/10 text-green-600 dark:text-green-400'
                     : row.status === 'active' ? 'bg-yellow-500/10 text-yellow-600 dark:text-yellow-400'
                     : 'bg-destructive/10 text-destructive'
                   }`}>
+                    <span className={`w-1.5 h-1.5 rounded-full ${
+                      row.status === 'ended' ? 'bg-green-500' : row.status === 'active' ? 'bg-yellow-500 animate-pulse' : 'bg-destructive'
+                    }`} />
                     {row.status}
                   </span>
                 </td>
-                <td className="px-4 py-3 text-right">
+                <td className="px-4 py-3 text-right border-b border-border/40">
                   <button
                     onClick={() => openCall(row.id)}
-                    className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-border hover:bg-muted transition-all"
+                    className="inline-flex items-center justify-center w-8 h-8 rounded-lg text-muted-foreground hover:text-primary hover:bg-primary/10 transition-all"
                     title="View transcript"
                   >
                     <Eye className="w-4 h-4" />
@@ -1145,23 +1219,28 @@ function CallsView() {
       {/* Transcript drawer */}
       {selected && (
         <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur flex items-center justify-center p-4" onClick={() => setSelected(null)}>
-          <div className="bg-card border border-border rounded-2xl w-full max-w-5xl max-h-[88vh] flex flex-col" onClick={e => e.stopPropagation()}>
-            <div className="flex items-center justify-between px-5 py-4 border-b border-border">
-              <div>
-                <h2 className="text-base font-bold text-foreground">Call #{selected.id}</h2>
-                <p className="text-xs text-muted-foreground mt-0.5">
-                  {CALL_TYPE_LABEL[selected.call_type] || selected.call_type} · {formatDateTime(selected.started_at)} · {formatDuration(selected.duration_s)}
-                </p>
+          <div className="bg-card border border-border rounded-2xl w-full max-w-6xl max-h-[90vh] flex flex-col shadow-2xl overflow-hidden" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between px-6 py-4 border-b border-border">
+              <div className="flex items-center gap-3">
+                <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-semibold border ${CALL_TYPE_BADGE[selected.call_type] || 'bg-muted text-foreground border-border'}`}>
+                  {CALL_TYPE_LABEL[selected.call_type] || selected.call_type}
+                </span>
+                <div>
+                  <h2 className="text-base font-bold text-foreground leading-tight">Call #{selected.id}</h2>
+                  <p className="text-xs text-muted-foreground">
+                    {formatDateTime(selected.started_at)} · {formatDuration(selected.duration_s)}
+                  </p>
+                </div>
               </div>
-              <button onClick={() => setSelected(null)} className="w-8 h-8 rounded-lg border border-border hover:bg-muted flex items-center justify-center">
+              <button onClick={() => setSelected(null)} className="w-9 h-9 rounded-lg hover:bg-muted flex items-center justify-center text-muted-foreground transition-colors">
                 <X className="w-4 h-4" />
               </button>
             </div>
 
             <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-2 lg:divide-x divide-border overflow-hidden">
               {/* LEFT — summary & result */}
-              <div className="overflow-auto px-5 py-4 space-y-3">
-                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-foreground">
+              <div className="overflow-auto px-6 py-5 space-y-3.5">
+                <div className="flex items-center gap-2 text-sm font-semibold text-foreground">
                   <Sparkles className="w-4 h-4 text-primary" /> Summary &amp; Result
                 </div>
 
@@ -1215,21 +1294,26 @@ function CallsView() {
               </div>
 
               {/* RIGHT — transcript */}
-              <div className="overflow-auto px-5 py-4 space-y-2 bg-muted/10">
-                <div className="flex items-center gap-2 text-xs font-bold uppercase tracking-wide text-foreground sticky top-0 bg-card/80 backdrop-blur -mx-5 px-5 -mt-4 pt-4 pb-2 z-10">
-                  <ListVideo className="w-4 h-4 text-primary" /> Transcript
-                  <span className="text-[10px] font-normal text-muted-foreground normal-case">({selected.transcript.length} turns)</span>
-                </div>
-                {selected.transcript.length === 0 ? (
-                  <p className="text-sm text-muted-foreground text-center py-8">No transcript captured.</p>
-                ) : selected.transcript.map((t, i) => (
-                  t.role === 'tool' ? (
-                    <ToolChip key={i} name={t.name} args={t.args} status={t.status} result={t.result} request={t.request} />
-                  ) : (
-                    <ChatBubble key={i} role={t.role as 'user' | 'model'} text={t.text || ''} />
-                  )
-                ))}
-              </div>
+              {(() => {
+                const turns = coalesceTranscript(selected.transcript)
+                return (
+                  <div className="overflow-auto px-6 py-5 space-y-4 bg-muted/[0.15]">
+                    <div className="flex items-center gap-2 text-sm font-semibold text-foreground sticky top-0 bg-card/90 backdrop-blur -mx-6 px-6 -mt-5 pt-5 pb-3 z-10 border-b border-border/50">
+                      <ListVideo className="w-4 h-4 text-primary" /> Transcript
+                      <span className="text-xs font-normal text-muted-foreground">· {turns.length} turns</span>
+                    </div>
+                    {turns.length === 0 ? (
+                      <p className="text-sm text-muted-foreground text-center py-8">No transcript captured.</p>
+                    ) : turns.map((t, i) => (
+                      t.role === 'tool' ? (
+                        <ToolChip key={i} name={t.name} args={t.args} status={t.status} result={t.result} request={t.request} />
+                      ) : (
+                        <ChatBubble key={i} role={t.role as 'user' | 'model'} text={t.text || ''} />
+                      )
+                    ))}
+                  </div>
+                )
+              })()}
             </div>
           </div>
         </div>
@@ -1778,17 +1862,22 @@ function ToolsView() {
   }
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 p-6 gap-4">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h1 className="text-xl font-bold text-foreground">Tools</h1>
-          <p className="text-sm text-muted-foreground">
-            Define HTTP endpoints agents can call mid-conversation. Each tool's parameters and response keys are passed to Gemini so it knows when and how to call them.
+    <div className="flex-1 flex flex-col min-h-0 p-6 gap-5 overflow-auto">
+      <div className="flex items-end justify-between flex-wrap gap-3">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2.5">
+            <h1 className="text-2xl font-bold tracking-tight text-foreground">Tools</h1>
+            {!loading && (
+              <span className="inline-flex items-center justify-center min-w-[1.5rem] h-6 px-2 rounded-full bg-primary/10 text-primary text-xs font-bold">{items.length}</span>
+            )}
+          </div>
+          <p className="text-sm text-muted-foreground max-w-2xl">
+            HTTP endpoints (or Python built-ins) agents can call mid-conversation. Parameters &amp; response keys are passed to Gemini so it knows when and how to call them.
           </p>
         </div>
         <button
           onClick={startCreate}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-all shadow-sm"
+          className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 active:scale-[0.98] transition-all shadow-sm"
         >
           <Plus className="w-4 h-4" />
           New Tool
@@ -1799,52 +1888,92 @@ function ToolsView() {
         <div className="bg-destructive/10 border border-destructive/20 rounded-xl px-4 py-3 text-sm text-destructive">{error}</div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 overflow-auto pb-4">
-        {loading && items.length === 0 ? (
-          <p className="col-span-full text-center text-muted-foreground py-10">Loading…</p>
-        ) : items.length === 0 ? (
-          <p className="col-span-full text-center text-muted-foreground py-10">No tools yet.</p>
-        ) : items.map(t => (
-          <div key={t.id} className="card flex flex-col gap-3">
-            <div className="flex items-start justify-between gap-2">
-              <div className="flex items-center gap-2 min-w-0">
-                <Webhook className="w-5 h-5 text-primary flex-shrink-0" />
-                <h3 className="font-bold text-foreground truncate">{t.name}</h3>
+      {loading && items.length === 0 ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+          {[0, 1, 2].map(i => (
+            <div key={i} className="rounded-2xl border border-border/70 bg-card p-5 h-48 animate-pulse">
+              <div className="flex items-center gap-3.5">
+                <div className="w-12 h-12 rounded-2xl bg-muted" />
+                <div className="flex-1 space-y-2"><div className="h-3.5 w-2/3 rounded bg-muted" /><div className="h-2.5 w-1/3 rounded bg-muted" /></div>
               </div>
-              {t.is_builtin && (
-                <span title="Built-in Python tool" className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/25 flex-shrink-0">
-                  <Lock className="w-3 h-3" /> BUILTIN
+              <div className="mt-4 space-y-2"><div className="h-2.5 w-full rounded bg-muted" /><div className="h-2.5 w-5/6 rounded bg-muted" /></div>
+            </div>
+          ))}
+        </div>
+      ) : items.length === 0 ? (
+        <div className="flex flex-col items-center justify-center text-center py-20 rounded-2xl border-2 border-dashed border-border">
+          <div className="w-14 h-14 rounded-2xl bg-primary/10 text-primary flex items-center justify-center mb-4"><Webhook className="w-7 h-7" /></div>
+          <h3 className="font-semibold text-foreground">No tools yet</h3>
+          <p className="text-sm text-muted-foreground mt-1 mb-5 max-w-xs">Create a tool to let agents call an external API or a built-in function.</p>
+          <button onClick={startCreate} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-all shadow-sm">
+            <Plus className="w-4 h-4" /> New Tool
+          </button>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+          {items.map(t => (
+            <div
+              key={t.id}
+              className="group flex flex-col rounded-2xl border border-border/70 bg-card p-5 transition-all duration-200 hover:shadow-[0_8px_30px_-12px_rgba(0,0,0,0.15)] hover:-translate-y-1 hover:border-border"
+            >
+              {/* Header */}
+              <div className="flex items-center gap-3.5">
+                <div className="w-12 h-12 rounded-2xl bg-primary/10 text-primary flex items-center justify-center flex-shrink-0">
+                  <Webhook className="w-6 h-6" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <h3 className="font-semibold text-[15px] text-foreground truncate leading-snug">{t.name}</h3>
+                  <p className="text-xs text-muted-foreground/60 truncate">{t.slug}</p>
+                </div>
+                <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-semibold flex-shrink-0 ${
+                  t.is_builtin ? 'bg-blue-500/10 text-blue-600 dark:text-blue-400' : 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                }`}>
+                  {t.is_builtin ? <><Lock className="w-2.5 h-2.5" /> Built-in</> : <><Globe className="w-2.5 h-2.5" /> HTTP</>}
                 </span>
-              )}
-            </div>
-            <p className="text-xs text-muted-foreground line-clamp-2">{t.description}</p>
-            {t.url ? (
-              <div className="text-[11px] font-mono bg-muted/30 border border-border rounded-lg px-2.5 py-1.5">
-                <span className="font-bold text-foreground">{t.http_method}</span>{' '}
-                <span className="text-muted-foreground break-all">{t.url}</span>
               </div>
-            ) : (
-              <div className="text-[11px] font-mono text-muted-foreground italic">Python builtin (no HTTP)</div>
-            )}
-            <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
-              <span><span className="font-semibold text-foreground">{t.parameters.length}</span> param{t.parameters.length === 1 ? '' : 's'}</span>
-              <span><span className="font-semibold text-foreground">{t.response_schema.length}</span> response key{t.response_schema.length === 1 ? '' : 's'}</span>
-              <span className="font-mono opacity-50">#{t.slug}</span>
-            </div>
-            <div className="flex items-center gap-2 pt-1 border-t border-border">
-              <button onClick={() => startEdit(t)} className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border border-border hover:bg-muted text-xs font-medium">
-                <Pencil className="w-3.5 h-3.5" />
-                Edit
-              </button>
-              {!t.is_builtin && (
-                <button onClick={() => remove(t)} className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-destructive/30 text-destructive hover:bg-destructive/10" title="Delete">
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
+
+              {/* Description */}
+              <p className="text-[13px] leading-relaxed text-muted-foreground line-clamp-2 mt-3.5 min-h-[2.6rem]">
+                {t.description || <span className="italic opacity-50">No description.</span>}
+              </p>
+
+              {/* Endpoint */}
+              {t.url ? (
+                <div className="flex items-center gap-2 mt-3 rounded-lg bg-muted/40 border border-border/50 px-2.5 py-1.5 min-w-0">
+                  <span className={`text-[10px] font-bold rounded px-1.5 py-0.5 flex-shrink-0 ${
+                    t.http_method === 'GET' ? 'bg-emerald-500/15 text-emerald-600 dark:text-emerald-400'
+                    : t.http_method === 'DELETE' ? 'bg-destructive/15 text-destructive'
+                    : 'bg-blue-500/15 text-blue-600 dark:text-blue-400'
+                  }`}>{t.http_method}</span>
+                  <code className="text-[11px] font-mono text-muted-foreground truncate" title={t.url}>{t.url}</code>
+                </div>
+              ) : (
+                <div className="flex items-center gap-1.5 mt-3 text-[11px] text-muted-foreground italic">
+                  <Cpu className="w-3.5 h-3.5 opacity-60" /> Python built-in (no HTTP)
+                </div>
               )}
+
+              {/* Meta */}
+              <div className="flex items-center flex-wrap gap-x-3.5 gap-y-1.5 mt-4 text-[11.5px] text-muted-foreground">
+                <span className="inline-flex items-center gap-1.5"><Braces className="w-3.5 h-3.5 opacity-60" /> {t.parameters.length} param{t.parameters.length === 1 ? '' : 's'}</span>
+                <span className="inline-flex items-center gap-1.5"><ArrowRight className="w-3.5 h-3.5 opacity-60" /> {t.response_schema.length} key{t.response_schema.length === 1 ? '' : 's'}</span>
+              </div>
+
+              {/* Actions */}
+              <div className="flex items-center gap-2 mt-5 pt-4 border-t border-border/50">
+                <button onClick={() => startEdit(t)} className="flex-1 inline-flex items-center justify-center gap-1.5 h-9 rounded-lg bg-muted/60 hover:bg-muted text-[13px] font-semibold text-foreground/90 transition-colors">
+                  <Pencil className="w-3.5 h-3.5" /> Edit
+                </button>
+                {!t.is_builtin && (
+                  <button onClick={() => remove(t)} className="inline-flex items-center justify-center w-9 h-9 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors" title="Delete tool">
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
             </div>
-          </div>
-        ))}
-      </div>
+          ))}
+        </div>
+      )}
 
       {(creating || editing) && (
         <div className="fixed inset-0 z-50 bg-background/80 backdrop-blur flex items-center justify-center p-4" onClick={closeModal}>
@@ -2141,6 +2270,13 @@ function emptyDraft(): AgentDraft {
 
 type Ambience = { slug: string; label: string; category: string; description: string }
 
+const AGENT_LANG_LABELS: Record<string, string> = {
+  en: 'English', hi: 'Hindi', bn: 'Bengali', ta: 'Tamil', te: 'Telugu',
+  mr: 'Marathi', gu: 'Gujarati', es: 'Spanish', fr: 'French', de: 'German',
+  ja: 'Japanese', ko: 'Korean', zh: 'Chinese',
+}
+const langLabel = (code: string) => AGENT_LANG_LABELS[code] || (code || 'en').toUpperCase()
+
 function AgentsView() {
   const [items, setItems] = useState<Agent[]>([])
   const [allTools, setAllTools] = useState<Tool[]>([])
@@ -2309,23 +2445,55 @@ function AgentsView() {
     )
   }
 
+  const phoneAgent = items.find(a => a.is_default_phone) || null
+
   return (
-    <div className="flex-1 flex flex-col min-h-0 p-6 gap-4">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h1 className="text-xl font-bold text-foreground">Agents</h1>
-          <p className="text-sm text-muted-foreground">
-            Manage system prompts shared by browser voice, Twilio bridge, and Vobiz. The agent marked <Star className="inline w-3.5 h-3.5 fill-current text-yellow-500" /> is used for inbound phone calls.
+    <div className="flex-1 flex flex-col min-h-0 p-6 gap-5 overflow-auto">
+      {/* ── Header ── */}
+      <div className="flex items-end justify-between flex-wrap gap-3">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2.5">
+            <h1 className="text-2xl font-bold tracking-tight text-foreground">Agents</h1>
+            {!loading && (
+              <span className="inline-flex items-center justify-center min-w-[1.5rem] h-6 px-2 rounded-full bg-primary/10 text-primary text-xs font-bold">
+                {items.length}
+              </span>
+            )}
+          </div>
+          <p className="text-sm text-muted-foreground max-w-2xl">
+            Reusable personas shared across browser voice, Twilio, Vobiz &amp; TATA. The agent marked{' '}
+            <span className="inline-flex items-center gap-0.5 font-medium text-amber-600 dark:text-amber-400">
+              <Star className="w-3.5 h-3.5 fill-current" />Phone
+            </span>{' '}
+            answers all inbound calls.
           </p>
         </div>
         <button
           onClick={startCreate}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-all shadow-sm"
+          className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 active:scale-[0.98] transition-all shadow-sm"
         >
           <Plus className="w-4 h-4" />
           New Agent
         </button>
       </div>
+
+      {/* ── Inbound-phone callout ── */}
+      {!loading && (
+        <div className="flex items-center gap-3 rounded-xl border border-amber-500/25 bg-amber-500/[0.06] px-4 py-3">
+          <div className="w-9 h-9 rounded-lg bg-amber-500/15 text-amber-600 dark:text-amber-400 flex items-center justify-center flex-shrink-0">
+            <PhoneCall className="w-4.5 h-4.5" />
+          </div>
+          <div className="text-sm min-w-0">
+            <span className="text-muted-foreground">Inbound phone calls are handled by </span>
+            {phoneAgent ? (
+              <span className="font-semibold text-foreground">{phoneAgent.name}</span>
+            ) : (
+              <span className="font-semibold text-amber-700 dark:text-amber-400">no agent yet — set one below</span>
+            )}
+            {phoneAgent && <span className="text-muted-foreground"> · {langLabel(phoneAgent.language)} · {phoneAgent.voice}</span>}
+          </div>
+        </div>
+      )}
 
       {error && (
         <div className="bg-destructive/10 border border-destructive/20 rounded-xl px-4 py-3 text-sm text-destructive">
@@ -2333,76 +2501,132 @@ function AgentsView() {
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 overflow-auto pb-4">
-        {loading && items.length === 0 ? (
-          <p className="col-span-full text-center text-muted-foreground py-10">Loading…</p>
-        ) : items.length === 0 ? (
-          <p className="col-span-full text-center text-muted-foreground py-10">No agents yet.</p>
-        ) : items.map(a => (
-          <div key={a.id} className={`card flex flex-col gap-3 ${a.is_default_phone ? 'ring-2 ring-yellow-500/40' : ''}`}>
-            <div className="flex items-start justify-between gap-2">
-              <div className="flex items-center gap-2 min-w-0">
-                <Bot className="w-5 h-5 text-primary flex-shrink-0" />
-                <h3 className="font-bold text-foreground truncate">{a.name}</h3>
+      {/* ── Grid ── */}
+      {loading && items.length === 0 ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
+          {[0, 1, 2].map(i => (
+            <div key={i} className="card h-56 animate-pulse">
+              <div className="flex items-center gap-3">
+                <div className="w-11 h-11 rounded-xl bg-muted" />
+                <div className="flex-1 space-y-2">
+                  <div className="h-3.5 w-2/3 rounded bg-muted" />
+                  <div className="h-2.5 w-1/3 rounded bg-muted" />
+                </div>
               </div>
-              <div className="flex items-center gap-1 flex-shrink-0">
-                {a.is_default_phone && (
-                  <span title="Default phone agent" className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-yellow-500/10 text-yellow-700 dark:text-yellow-400 border border-yellow-500/25">
-                    <Star className="w-3 h-3 fill-current" /> PHONE
-                  </span>
-                )}
-                {a.is_builtin && (
-                  <span title="Built-in agent" className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-bold bg-blue-500/10 text-blue-600 dark:text-blue-400 border border-blue-500/25">
-                    <Lock className="w-3 h-3" /> BUILTIN
-                  </span>
-                )}
+              <div className="mt-4 space-y-2">
+                <div className="h-2.5 w-full rounded bg-muted" />
+                <div className="h-2.5 w-5/6 rounded bg-muted" />
               </div>
             </div>
-
-            {a.description && <p className="text-xs text-muted-foreground line-clamp-2">{a.description}</p>}
-
-            <div className="text-xs font-mono bg-muted/30 border border-border rounded-lg px-2.5 py-2 max-h-24 overflow-y-auto text-foreground/80 whitespace-pre-wrap leading-relaxed">
-              {a.system_prompt.slice(0, 200)}{a.system_prompt.length > 200 ? '…' : ''}
-            </div>
-
-            <div className="flex items-center gap-3 text-[11px] text-muted-foreground">
-              <span><span className="font-semibold text-foreground">Voice:</span> {a.voice}</span>
-              <span><span className="font-semibold text-foreground">Lang:</span> {a.language}</span>
-              <span className="font-mono opacity-50">#{a.slug}</span>
-            </div>
-
-            <div className="flex items-center gap-2 pt-1 border-t border-border">
-              <button
-                onClick={() => startEdit(a)}
-                className="flex-1 inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border border-border hover:bg-muted text-xs font-medium"
-              >
-                <Pencil className="w-3.5 h-3.5" />
-                Edit
-              </button>
-              {!a.is_default_phone && (
-                <button
-                  onClick={() => makeDefault(a)}
-                  className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 rounded-lg border border-yellow-500/40 text-yellow-700 dark:text-yellow-400 hover:bg-yellow-500/10 text-xs font-medium"
-                  title="Use as default for inbound phone calls"
-                >
-                  <Star className="w-3.5 h-3.5" />
-                  Set default
-                </button>
-              )}
-              {!a.is_builtin && (
-                <button
-                  onClick={() => remove(a)}
-                  className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-destructive/30 text-destructive hover:bg-destructive/10"
-                  title="Delete"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              )}
-            </div>
+          ))}
+        </div>
+      ) : items.length === 0 ? (
+        <div className="flex flex-col items-center justify-center text-center py-20 rounded-2xl border-2 border-dashed border-border">
+          <div className="w-14 h-14 rounded-2xl bg-primary/10 text-primary flex items-center justify-center mb-4">
+            <Bot className="w-7 h-7" />
           </div>
-        ))}
-      </div>
+          <h3 className="font-semibold text-foreground">No agents yet</h3>
+          <p className="text-sm text-muted-foreground mt-1 mb-5 max-w-xs">
+            Create your first agent to define a system prompt, voice, tools and knowledge bases.
+          </p>
+          <button
+            onClick={startCreate}
+            className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-all shadow-sm"
+          >
+            <Plus className="w-4 h-4" /> New Agent
+          </button>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+          {items.map(a => (
+            <div
+              key={a.id}
+              className={`group relative flex flex-col rounded-2xl border bg-card p-5 transition-all duration-200 hover:shadow-[0_8px_30px_-12px_rgba(0,0,0,0.15)] hover:-translate-y-1 ${
+                a.is_default_phone
+                  ? 'border-amber-400/50 bg-gradient-to-b from-amber-50/50 to-transparent dark:from-amber-500/[0.04]'
+                  : 'border-border/70 hover:border-border'
+              }`}
+            >
+              {/* Header */}
+              <div className="flex items-center gap-3.5">
+                <div className={`w-12 h-12 rounded-2xl flex items-center justify-center flex-shrink-0 ${
+                  a.is_default_phone
+                    ? 'bg-amber-500/15 text-amber-600 dark:text-amber-400'
+                    : 'bg-primary/10 text-primary'
+                }`}>
+                  <Bot className="w-6 h-6" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <h3 className="font-semibold text-[15px] text-foreground truncate leading-snug">{a.name}</h3>
+                  <p className="text-xs text-muted-foreground/60 truncate">{a.slug}</p>
+                </div>
+              </div>
 
+              {/* Badges */}
+              {(a.is_default_phone || a.is_builtin) && (
+                <div className="flex items-center gap-1.5 mt-3">
+                  {a.is_default_phone && (
+                    <span title="Answers inbound phone calls" className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-semibold bg-amber-500/12 text-amber-700 dark:text-amber-400">
+                      <Star className="w-2.5 h-2.5 fill-current" /> Inbound phone
+                    </span>
+                  )}
+                  {a.is_builtin && (
+                    <span title="Built-in agent — name locked, cannot be deleted" className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md text-[10.5px] font-semibold bg-muted text-muted-foreground">
+                      <Lock className="w-2.5 h-2.5" /> Built-in
+                    </span>
+                  )}
+                </div>
+              )}
+
+              {/* Description */}
+              <p className="text-[13px] leading-relaxed text-muted-foreground line-clamp-2 mt-3.5 min-h-[2.6rem]">
+                {a.description || a.system_prompt?.trim() || <span className="italic opacity-50">No description.</span>}
+              </p>
+
+              {/* Meta — single airy inline row */}
+              <div className="flex items-center flex-wrap gap-x-3.5 gap-y-1.5 mt-4 text-[11.5px] text-muted-foreground">
+                <span className="inline-flex items-center gap-1.5"><Volume2 className="w-3.5 h-3.5 opacity-60" /> {a.voice}</span>
+                <span className="inline-flex items-center gap-1.5"><Globe className="w-3.5 h-3.5 opacity-60" /> {langLabel(a.language)}</span>
+                <span className="inline-flex items-center gap-1.5" title={`${a.tool_ids.length} tool(s)`}><Wrench className="w-3.5 h-3.5 opacity-60" /> {a.tool_ids.length}</span>
+                {a.kb_collection_ids.length > 0 && (
+                  <span className="inline-flex items-center gap-1.5" title={`${a.kb_collection_ids.length} knowledge base(s)`}><BookOpen className="w-3.5 h-3.5 opacity-60" /> {a.kb_collection_ids.length}</span>
+                )}
+                {a.first_message && (
+                  <span className="inline-flex items-center gap-1.5 text-primary font-medium" title="Speaks a greeting on connect"><Sparkles className="w-3.5 h-3.5" /> Greeting</span>
+                )}
+              </div>
+
+              {/* Actions */}
+              <div className="flex items-center gap-2 mt-5 pt-4 border-t border-border/50">
+                <button
+                  onClick={() => startEdit(a)}
+                  className="flex-1 inline-flex items-center justify-center gap-1.5 h-9 rounded-lg bg-muted/60 hover:bg-muted text-[13px] font-semibold text-foreground/90 transition-colors"
+                >
+                  <Pencil className="w-3.5 h-3.5" /> Edit
+                </button>
+                {!a.is_default_phone && (
+                  <button
+                    onClick={() => makeDefault(a)}
+                    className="inline-flex items-center justify-center gap-1.5 h-9 px-3.5 rounded-lg text-amber-700 dark:text-amber-400 hover:bg-amber-500/10 text-[13px] font-semibold transition-colors"
+                    title="Use as default for inbound phone calls"
+                  >
+                    <Star className="w-3.5 h-3.5" /> Set phone
+                  </button>
+                )}
+                {!a.is_builtin && (
+                  <button
+                    onClick={() => remove(a)}
+                    className="inline-flex items-center justify-center w-9 h-9 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 transition-colors"
+                    title="Delete agent"
+                  >
+                    <Trash2 className="w-4 h-4" />
+                  </button>
+                )}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
@@ -3223,17 +3447,22 @@ function KnowledgeBaseView() {
   }
 
   return (
-    <div className="flex-1 flex flex-col min-h-0 p-6 gap-4">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <div>
-          <h1 className="text-xl font-bold text-foreground">Knowledge Base</h1>
-          <p className="text-sm text-muted-foreground">
-            Upload PDFs, text, or markdown. Agents you link to a KB can search it during calls via <code className="font-mono text-xs">search_knowledge_base</code>.
+    <div className="flex-1 flex flex-col min-h-0 p-6 gap-5 overflow-auto">
+      <div className="flex items-end justify-between flex-wrap gap-3">
+        <div className="space-y-1">
+          <div className="flex items-center gap-2.5">
+            <h1 className="text-2xl font-bold tracking-tight text-foreground">Knowledge Base</h1>
+            {!loading && (
+              <span className="inline-flex items-center justify-center min-w-[1.5rem] h-6 px-2 rounded-full bg-primary/10 text-primary text-xs font-bold">{collections.length}</span>
+            )}
+          </div>
+          <p className="text-sm text-muted-foreground max-w-2xl">
+            Upload PDFs, text, or markdown. Agents linked to a KB can search it during calls via <code className="font-mono text-xs bg-muted/60 px-1 py-0.5 rounded">search_knowledge_base</code>.
           </p>
         </div>
         <button
           onClick={() => setCreating(true)}
-          className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-all shadow-sm"
+          className="flex items-center gap-2 px-4 py-2.5 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 active:scale-[0.98] transition-all shadow-sm"
         >
           <Plus className="w-4 h-4" />
           New Knowledge Base
@@ -3245,8 +3474,8 @@ function KnowledgeBaseView() {
       )}
 
       {creating && (
-        <div className="card flex flex-col gap-3">
-          <h3 className="text-sm font-bold uppercase tracking-wide text-foreground">New Knowledge Base</h3>
+        <div className="rounded-2xl border border-border/70 bg-card p-5 flex flex-col gap-4">
+          <h3 className="text-sm font-semibold text-foreground">New Knowledge Base</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <input
               autoFocus
@@ -3254,14 +3483,14 @@ function KnowledgeBaseView() {
               value={newName}
               onChange={e => setNewName(e.target.value)}
               placeholder="e.g. Product Manual"
-              className="bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
+              className="bg-background border border-border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-all"
             />
             <input
               type="text"
               value={newDesc}
               onChange={e => setNewDesc(e.target.value)}
               placeholder="Short description (optional)"
-              className="bg-background border border-border rounded-lg px-3 py-2 text-sm focus:outline-none focus:border-primary"
+              className="bg-background border border-border rounded-lg px-3 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-primary/30 focus:border-primary transition-all"
             />
           </div>
           <div className="flex items-center gap-2">
@@ -3273,49 +3502,82 @@ function KnowledgeBaseView() {
               {saving && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
               Create
             </button>
-            <button onClick={() => { setCreating(false); setNewName(''); setNewDesc('') }} className="px-4 py-2 rounded-lg border border-border hover:bg-muted text-sm font-medium">
+            <button onClick={() => { setCreating(false); setNewName(''); setNewDesc('') }} className="px-4 py-2 rounded-lg hover:bg-muted text-sm font-medium text-muted-foreground">
               Cancel
             </button>
           </div>
         </div>
       )}
 
-      <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 overflow-auto pb-4">
-        {loading && collections.length === 0 ? (
-          <p className="col-span-full text-center text-muted-foreground py-10">Loading…</p>
-        ) : collections.length === 0 ? (
-          <p className="col-span-full text-center text-muted-foreground py-10">No knowledge bases yet. Create one to get started.</p>
-        ) : collections.map(c => (
-          <div key={c.id} className="card flex flex-col gap-3">
-            <div className="flex items-start justify-between gap-2">
-              <div className="flex items-center gap-2 min-w-0">
-                <Database className="w-5 h-5 text-primary flex-shrink-0" />
-                <h3 className="font-bold text-foreground truncate">{c.name}</h3>
+      {loading && collections.length === 0 ? (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+          {[0, 1, 2].map(i => (
+            <div key={i} className="rounded-2xl border border-border/70 bg-card p-5 h-44 animate-pulse">
+              <div className="flex items-center gap-3.5">
+                <div className="w-12 h-12 rounded-2xl bg-muted" />
+                <div className="flex-1 space-y-2"><div className="h-3.5 w-2/3 rounded bg-muted" /><div className="h-2.5 w-1/3 rounded bg-muted" /></div>
               </div>
-              <button
-                onClick={() => removeCollection(c)}
-                className="inline-flex items-center justify-center w-8 h-8 rounded-lg border border-destructive/30 text-destructive hover:bg-destructive/10 flex-shrink-0"
-                title="Delete"
-              >
-                <Trash2 className="w-3.5 h-3.5" />
-              </button>
+              <div className="mt-4 space-y-2"><div className="h-2.5 w-full rounded bg-muted" /><div className="h-2.5 w-4/6 rounded bg-muted" /></div>
             </div>
-            {c.description && <p className="text-xs text-muted-foreground line-clamp-2">{c.description}</p>}
-            <div className="flex items-center gap-4 text-[11px] text-muted-foreground">
-              <span><span className="font-semibold text-foreground">{c.document_count}</span> docs</span>
-              <span><span className="font-semibold text-foreground">{c.chunk_count}</span> chunks</span>
-              <span className="font-mono opacity-50">#{c.slug}</span>
-            </div>
-            <button
+          ))}
+        </div>
+      ) : collections.length === 0 ? (
+        <div className="flex flex-col items-center justify-center text-center py-20 rounded-2xl border-2 border-dashed border-border">
+          <div className="w-14 h-14 rounded-2xl bg-primary/10 text-primary flex items-center justify-center mb-4"><Database className="w-7 h-7" /></div>
+          <h3 className="font-semibold text-foreground">No knowledge bases yet</h3>
+          <p className="text-sm text-muted-foreground mt-1 mb-5 max-w-xs">Create one and upload documents so your agents can answer from them.</p>
+          <button onClick={() => setCreating(true)} className="flex items-center gap-2 px-4 py-2 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-all shadow-sm">
+            <Plus className="w-4 h-4" /> New Knowledge Base
+          </button>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+          {collections.map(c => (
+            <div
+              key={c.id}
               onClick={() => setSelected(c)}
-              className="w-full inline-flex items-center justify-center gap-1.5 px-3 py-2 rounded-lg border border-border hover:bg-muted text-xs font-medium mt-1"
+              className="group flex flex-col rounded-2xl border border-border/70 bg-card p-5 cursor-pointer transition-all duration-200 hover:shadow-[0_8px_30px_-12px_rgba(0,0,0,0.15)] hover:-translate-y-1 hover:border-border"
             >
-              <FileText className="w-3.5 h-3.5" />
-              Manage documents
-            </button>
-          </div>
-        ))}
-      </div>
+              {/* Header */}
+              <div className="flex items-center gap-3.5">
+                <div className="w-12 h-12 rounded-2xl bg-primary/10 text-primary flex items-center justify-center flex-shrink-0">
+                  <Database className="w-6 h-6" />
+                </div>
+                <div className="min-w-0 flex-1">
+                  <h3 className="font-semibold text-[15px] text-foreground truncate leading-snug">{c.name}</h3>
+                  <p className="text-xs text-muted-foreground/60 truncate">{c.slug}</p>
+                </div>
+                <button
+                  onClick={e => { e.stopPropagation(); removeCollection(c) }}
+                  className="inline-flex items-center justify-center w-9 h-9 rounded-lg text-muted-foreground hover:text-destructive hover:bg-destructive/10 flex-shrink-0 transition-colors opacity-0 group-hover:opacity-100"
+                  title="Delete knowledge base"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
+              </div>
+
+              {/* Description */}
+              <p className="text-[13px] leading-relaxed text-muted-foreground line-clamp-2 mt-3.5 min-h-[2.6rem]">
+                {c.description || <span className="italic opacity-50">No description.</span>}
+              </p>
+
+              {/* Meta */}
+              <div className="flex items-center flex-wrap gap-x-3.5 gap-y-1.5 mt-4 text-[11.5px] text-muted-foreground">
+                <span className="inline-flex items-center gap-1.5"><FileText className="w-3.5 h-3.5 opacity-60" /> {c.document_count} doc{c.document_count === 1 ? '' : 's'}</span>
+                <span className="inline-flex items-center gap-1.5"><Braces className="w-3.5 h-3.5 opacity-60" /> {c.chunk_count} chunk{c.chunk_count === 1 ? '' : 's'}</span>
+              </div>
+
+              {/* Action */}
+              <div className="flex items-center gap-2 mt-5 pt-4 border-t border-border/50">
+                <span className="flex-1 inline-flex items-center justify-center gap-1.5 h-9 rounded-lg bg-muted/60 group-hover:bg-muted text-[13px] font-semibold text-foreground/90 transition-colors">
+                  <FileText className="w-3.5 h-3.5" /> Manage documents
+                  <ArrowRight className="w-3.5 h-3.5 opacity-0 -ml-1 group-hover:opacity-100 group-hover:ml-0 transition-all" />
+                </span>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   )
 }
