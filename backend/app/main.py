@@ -17,7 +17,7 @@ from .services.auth import hash_password
 from .seed_data import SEED_MODELS, compute_profile_for
 from .routes import auth, models_route, token_route, admin_route, config_routes, tts_route, fx_route, setup_route, internal_route
 from .ultravox.routes import ultravox, whatsapp
-from .gemini.routes import call as gemini_call, calls as gemini_calls, twilio_bridge, vobiz_bridge, voice_samples, agents as gemini_agents, tools as gemini_tools_route, ambience as gemini_ambience, kb as gemini_kb_route
+from .gemini.routes import call as gemini_call, calls as gemini_calls, twilio_bridge, vobiz_bridge, tata_bridge, voice_samples, agents as gemini_agents, tools as gemini_tools_route, ambience as gemini_ambience, kb as gemini_kb_route
 from .services import model_setup, room_config_cache
 
 from .log_buffer import install as _install_log_buffer
@@ -304,6 +304,7 @@ app.include_router(whatsapp.router,       prefix="/api/whatsapp",  tags=["whatsa
 app.include_router(gemini_call.router,    prefix="/api/gemini",    tags=["gemini"])
 app.include_router(twilio_bridge.router,  prefix="/api/twilio",    tags=["twilio"])
 app.include_router(vobiz_bridge.router,   prefix="/api/vobiz",     tags=["vobiz"])
+app.include_router(tata_bridge.router,    prefix="/api/tata",      tags=["tata"])
 app.include_router(gemini_calls.router,   prefix="/api/gemini-calls", tags=["gemini-calls"])
 app.include_router(voice_samples.router,  prefix="/api/voice-samples", tags=["voice-samples"])
 app.include_router(gemini_agents.router,  prefix="/api/agents", tags=["agents"])
