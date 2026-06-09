@@ -93,6 +93,13 @@ TATA_CALL_OPTIONS_URL = os.environ.get(
 ).strip()
 TATA_TRANSFER_CODE = os.environ.get("TATA_TRANSFER_CODE", "").strip()
 
+# Active hangup. When WE end the call (Gemini permanently down, fatal error,
+# etc.) we must proactively disconnect the TATA leg, otherwise it keeps ringing
+# dead air and billing up to `call_timeout` (600 s). The disconnect endpoint
+# varies per Smartflo plan — set TATA_HANGUP_URL to your account's call-hangup
+# API; we fall back to a /call/hangup path on the Call Options host.
+TATA_HANGUP_URL = os.environ.get("TATA_HANGUP_URL", "").strip()
+
 MODEL       = os.environ.get("GEMINI_LIVE_MODEL", "gemini-2.0-flash-live-001")
 API_VERSION = os.environ.get("GEMINI_API_VERSION", "v1beta")
 
@@ -342,6 +349,29 @@ async def _tata_transfer(call_id: str | None, intercom: str | None) -> dict:
         return {"status": "error", "message": f"TATA transfer request failed: {exc}"}
 
 
+async def _tata_hangup(call_id: str | None) -> None:
+    """Best-effort: actively disconnect the live TATA call leg so it stops
+    billing once WE terminate the call (fatal error, Gemini unavailable, etc.).
+
+    No-op when the caller already hung up (TATA already tore the leg down) or no
+    auth/call_id is available. The exact disconnect endpoint differs per Smartflo
+    plan — override TATA_HANGUP_URL to match your account's call-hangup API.
+    """
+    if not (TATA_AUTH_TOKEN and call_id):
+        return
+    url = TATA_HANGUP_URL or (TATA_CALL_OPTIONS_URL.rsplit("/", 1)[0] + "/call/hangup")
+    payload = {"call_id": call_id}
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.post(
+                url, json=payload, headers={"Authorization": TATA_AUTH_TOKEN}
+            ) as resp:
+                body = await resp.text()
+                log.info("TATA hangup (call %s) → %s %s", call_id, resp.status, body[:200])
+    except Exception as exc:  # best-effort: never raise out of teardown
+        log.warning("TATA hangup failed (call %s): %s", call_id, exc)
+
+
 # ── TATA Media Streams WebSocket ──────────────────────────────────────────────
 
 @router.websocket("/stream")
@@ -362,6 +392,9 @@ async def tata_stream(ws: WebSocket):
     out_buf = bytearray()       # μ-law bytes pending 160-byte framing
     log_id: int | None = None
     transfer_state = {"active": False}
+    # True once the caller hung up / the WS dropped — TATA has already torn the
+    # leg down, so we must NOT issue a (billable, pointless) active hangup.
+    ended_by_caller = {"v": False}
     # Updated whenever a tool response carries a `transfer_number` (e.g. an agent
     # availability lookup returns {"transfer_number": "1003"}). transfer_call then
     # routes to that extension instead of the static TATA_TRANSFER_CODE.
@@ -436,6 +469,7 @@ async def tata_stream(ws: WebSocket):
     client = genai.Client(api_key=GOOGLE_API_KEY, http_options={"api_version": API_VERSION})
 
     client_closed = False
+    fatal_error: str | None = None
     reconnect_count = 0
     # Consecutive Gemini server errors (503 high-demand / UNAVAILABLE) with no
     # productive session in between. Reset whenever a session yields audio, so a
@@ -479,6 +513,7 @@ async def tata_stream(ws: WebSocket):
                                 raw = await ws.receive_text()
                             except WebSocketDisconnect:
                                 client_closed = True
+                                ended_by_caller["v"] = True
                                 return
                             msg = json.loads(raw)
                             event = msg.get("event")
@@ -499,6 +534,7 @@ async def tata_stream(ws: WebSocket):
                             elif event == "stop":
                                 log.info("TATA stream %s stopped", stream_sid)
                                 client_closed = True
+                                ended_by_caller["v"] = True
                                 return
 
                     async def gemini_to_tata():
@@ -506,6 +542,10 @@ async def tata_stream(ws: WebSocket):
                         _FILLER_BYTES = (OUTPUT_SAMPLE_RATE // 25) * 2  # 40 ms @ 24 kHz PCM16
                         _FILLER_SILENCE = b"\x00" * _FILLER_BYTES
                         filler_box: dict = {"task": None}
+                        # Set when the agent invokes transfer_call: we hold the actual
+                        # PBX transfer until the agent has spoken its hand-off line, so
+                        # the caller/human aren't bridged into silence.
+                        pending_transfer: dict = {"intercom": None}
 
                         async def _send_mixed(pcm24k: bytes):
                             nonlocal out_state, out_buf
@@ -544,6 +584,39 @@ async def tata_stream(ws: WebSocket):
                                     pass
                                 filler_box["task"] = None
 
+                        async def _flush_out_buf():
+                            """Drain whatever μ-law is buffered, padding the final
+                            partial frame to 160 bytes (μ-law silence = 0xFF) so the
+                            agent's last words aren't clipped before a transfer."""
+                            nonlocal out_buf
+                            if not stream_sid or not out_buf:
+                                return
+                            rem = len(out_buf) % TATA_FRAME_BYTES
+                            if rem:
+                                out_buf.extend(b"\xff" * (TATA_FRAME_BYTES - rem))
+                            while len(out_buf) >= TATA_FRAME_BYTES:
+                                frame = bytes(out_buf[:TATA_FRAME_BYTES])
+                                del out_buf[:TATA_FRAME_BYTES]
+                                try:
+                                    await ws.send_text(json.dumps({
+                                        "event": "media",
+                                        "streamSid": stream_sid,
+                                        "media": {"payload": base64.b64encode(frame).decode()},
+                                    }))
+                                except Exception:
+                                    return
+
+                        async def _do_pending_transfer():
+                            """Fire the deferred PBX transfer now that the agent has
+                            finished speaking its hand-off line."""
+                            await _flush_out_buf()
+                            result = await _tata_transfer(tata_call_sid, pending_transfer["intercom"])
+                            log.info("Transfer (after hand-off line) → %s", result)
+                            if result.get("status") == "ok":
+                                transfer_state["active"] = True
+                                log.info("Transfer accepted by TATA — releasing call to human agent")
+                            await _stop_filler()
+
                         try:
                             while True:
                                 async for response in session.receive():
@@ -553,7 +626,6 @@ async def tata_stream(ws: WebSocket):
                                         if (always_mixer.enabled or tool_mixer.enabled) and filler_box["task"] is None:
                                             filler_box["task"] = asyncio.create_task(_filler_loop())
                                         tool_responses = []
-                                        did_transfer = False
                                         for fc in tc.function_calls:
                                             _args = dict(fc.args or {})
                                             tool_meta: dict = {}
@@ -571,9 +643,17 @@ async def tata_stream(ws: WebSocket):
                                                     or call_transfer_code
                                                     or ""
                                                 )
-                                                result = await _tata_transfer(tata_call_sid, intercom)
-                                                if result.get("status") == "ok":
-                                                    did_transfer = True
+                                                # DEFER the PBX transfer: stash the target and tell the
+                                                # agent to speak its hand-off line. The transfer fires
+                                                # once the agent's turn completes (see turn_complete
+                                                # below) so the caller isn't bridged into silence.
+                                                pending_transfer["intercom"] = intercom
+                                                result = {
+                                                    "status": "ok",
+                                                    "message": ("Say a brief hand-off line to the caller now, "
+                                                                "e.g. 'Sure, please hold while I connect you to a "
+                                                                "human agent.' Then stop talking."),
+                                                }
                                             else:
                                                 result = await dispatch_tool_call(
                                                     call_tool_ids, fc.name, _args,
@@ -597,14 +677,6 @@ async def tata_stream(ws: WebSocket):
                                                 types.FunctionResponse(id=fc.id, name=fc.name, response=result)
                                             )
                                         await session.send_tool_response(function_responses=tool_responses)
-                                        if did_transfer:
-                                            # Stop forwarding agent audio and tear down Gemini;
-                                            # TATA now owns the call leg. Keep the WS open so the
-                                            # PBX can complete the bridge to the human agent.
-                                            transfer_state["active"] = True
-                                            log.info("Transfer accepted by TATA — releasing call to human agent")
-                                            await _stop_filler()
-                                            return
                                         continue
 
                                     sc = response.server_content
@@ -622,6 +694,14 @@ async def tata_stream(ws: WebSocket):
                                     if sc and sc.output_transcription and sc.output_transcription.text:
                                         log.info("🤖 %s", sc.output_transcription.text)
                                         await add_transcript(log_id, "model", sc.output_transcription.text)
+                                    # Deferred transfer: the agent has now finished its
+                                    # hand-off line → execute the PBX transfer and tear down.
+                                    if pending_transfer["intercom"] is not None and sc and (
+                                        getattr(sc, "turn_complete", False)
+                                        or getattr(sc, "generation_complete", False)
+                                    ):
+                                        await _do_pending_transfer()
+                                        return
                                 await asyncio.sleep(0)
                         finally:
                             await _stop_filler()
@@ -702,19 +782,37 @@ async def tata_stream(ws: WebSocket):
         # the PBX tears the call down, so we don't drop the leg mid-transfer.
         if transfer_state["active"]:
             log.info("Transfer in progress — holding TATA stream open until call ends")
-            try:
+
+            async def _drain_until_stop():
                 while True:
                     raw = await ws.receive_text()
                     if json.loads(raw).get("event") == "stop":
-                        break
+                        ended_by_caller["v"] = True
+                        return
+
+            # Bounded hold: never block past the call's own max lifetime, so a
+            # missing `stop` can't leak the leg/socket forever.
+            try:
+                await asyncio.wait_for(_drain_until_stop(), timeout=660)
+            except asyncio.TimeoutError:
+                log.warning("Post-transfer hold timed out — releasing TATA stream")
             except WebSocketDisconnect:
-                pass
+                ended_by_caller["v"] = True
 
     except WebSocketDisconnect:
         log.info("TATA stream disconnected (stream_sid=%s)", stream_sid)
+        ended_by_caller["v"] = True
     except Exception as exc:
         log.exception("TATA bridge error")
-        await end_call(log_id, status="error", error_message=str(exc))
-        return
+        fatal_error = str(exc)
     finally:
-        await end_call(log_id, api_key=GOOGLE_API_KEY or None)
+        # If WE ended the call (fatal error / Gemini unavailable / hold timeout)
+        # while the caller is still connected, actively hang up the TATA leg so it
+        # stops billing. Skip when the caller already hung up, or when a transfer
+        # handed the leg off to TATA (the PBX now owns it).
+        if not ended_by_caller["v"] and not transfer_state["active"]:
+            await _tata_hangup(tata_call_sid)
+        if fatal_error:
+            await end_call(log_id, status="error", error_message=fatal_error)
+        else:
+            await end_call(log_id, api_key=GOOGLE_API_KEY or None)
