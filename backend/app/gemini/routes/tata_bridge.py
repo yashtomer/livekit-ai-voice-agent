@@ -400,6 +400,10 @@ async def tata_stream(ws: WebSocket):
     # True once the caller hung up / the WS dropped — TATA has already torn the
     # leg down, so we must NOT issue a (billable, pointless) active hangup.
     ended_by_caller = {"v": False}
+    # Greeting fires once per call. On OUTBOUND the stream connects while the
+    # customer is still ringing, so we defer the greeting until the first inbound
+    # audio frame (= customer answered) instead of speaking into dead air.
+    greeting_state = {"sent": False}
     # Updated whenever a tool response carries a `transfer_number` (e.g. an agent
     # availability lookup returns {"transfer_number": "1003"}). transfer_call then
     # routes to that extension instead of the static TATA_TRANSFER_CODE.
@@ -493,9 +497,14 @@ async def tata_stream(ws: WebSocket):
                     if reconnect_count:
                         log.debug("Gemini Live reconnected (attempt %d)", reconnect_count)
 
-                    # Greeting: speak the configured first message on connect
-                    # (only on the very first session, not after a reconnect).
-                    if call_first_message and reconnect_count == 0:
+                    # Greeting: speak the configured first message exactly once per
+                    # call. INBOUND → speak immediately (the caller is already on the
+                    # line). OUTBOUND → defer until the first inbound audio frame, so
+                    # we don't start the greeting while the customer is still ringing.
+                    async def send_greeting():
+                        if greeting_state["sent"] or not call_first_message:
+                            return
+                        greeting_state["sent"] = True
                         greeting = render_template(call_first_message, build_call_context(
                             caller_id=caller_number, call_sid=tata_call_sid or stream_sid, conversation_id=log_id,
                         ))
@@ -510,6 +519,9 @@ async def tata_stream(ws: WebSocket):
                             )
                         except Exception:
                             log.exception("Failed to send greeting")
+
+                    if direction != "outbound":
+                        await send_greeting()
 
                     async def tata_to_gemini():
                         nonlocal in_state, client_closed
@@ -526,6 +538,10 @@ async def tata_stream(ws: WebSocket):
                                 payload = (msg.get("media") or {}).get("payload", "")
                                 if not payload:
                                     continue
+                                # First inbound audio on an outbound call = the customer
+                                # picked up → speak the greeting now (no-op otherwise).
+                                if not greeting_state["sent"]:
+                                    await send_greeting()
                                 mulaw = base64.b64decode(payload)
                                 pcm16k, in_state = _mulaw8k_to_pcm16k(mulaw, in_state)
                                 try:
