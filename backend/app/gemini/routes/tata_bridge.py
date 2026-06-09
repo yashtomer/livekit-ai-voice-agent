@@ -292,9 +292,14 @@ async def tata_config(request: Request):
         "transfer_enabled": bool(TATA_AUTH_TOKEN and TATA_TRANSFER_CODE),
         "transfer_code": TATA_TRANSFER_CODE or None,
         "outbound_number": TATA_CALLER_ID or TATA_AGENT_NUMBER or None,
+        # Inbound: the DID the caller dials to reach this agent (the Voice-Streaming
+        # number registered in the TATA portal). Sourced from TATA_AGENT_NUMBER.
+        "agent_number": TATA_AGENT_NUMBER or None,
+        "inbound_enabled": bool(VITE_BACKEND_URL and TATA_AGENT_NUMBER),
         "missing_env": [n for n, v in [
             ("VITE_BACKEND_URL", VITE_BACKEND_URL),
             ("TATA_AUTH_TOKEN", TATA_AUTH_TOKEN),
+            ("TATA_AGENT_NUMBER", TATA_AGENT_NUMBER),
             ("TATA_CALLER_ID or TATA_AGENT_NUMBER", TATA_CALLER_ID or TATA_AGENT_NUMBER),
         ] if not v],
     })
@@ -689,10 +694,10 @@ async def tata_stream(ws: WebSocket):
                                         await _stop_filler()
                                         await _send_mixed(always_mixer.mix(response.data))
                                     if sc and sc.input_transcription and sc.input_transcription.text:
-                                        log.info("👤 %s", sc.input_transcription.text)
+                                        log.debug("👤 %s", sc.input_transcription.text)
                                         await add_transcript(log_id, "user", sc.input_transcription.text)
                                     if sc and sc.output_transcription and sc.output_transcription.text:
-                                        log.info("🤖 %s", sc.output_transcription.text)
+                                        log.debug("🤖 %s", sc.output_transcription.text)
                                         await add_transcript(log_id, "model", sc.output_transcription.text)
                                     # Deferred transfer: the agent has now finished its
                                     # hand-off line → execute the PBX transfer and tear down.
@@ -816,3 +821,8 @@ async def tata_stream(ws: WebSocket):
             await end_call(log_id, status="error", error_message=fatal_error)
         else:
             await end_call(log_id, api_key=GOOGLE_API_KEY or None)
+        log.info(
+            "📞 CALL ENDED (log_id=%s, call=%s) | by_caller=%s transferred=%s%s",
+            log_id, tata_call_sid, ended_by_caller["v"], transfer_state["active"],
+            f" error={fatal_error}" if fatal_error else "",
+        )
