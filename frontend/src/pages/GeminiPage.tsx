@@ -595,6 +595,113 @@ function PhoneDialer() {
   )
 }
 
+// ── Inbound Call (TATA) ──────────────────────────────────────────────────────
+
+interface TataConfig {
+  stream_ws_url: string
+  outbound_enabled: boolean
+  inbound_enabled: boolean
+  transfer_enabled: boolean
+  transfer_code: string | null
+  outbound_number: string | null
+  agent_number: string | null
+  missing_env: string[]
+}
+
+function InboundCard() {
+  const [cfg, setCfg] = useState<TataConfig | null>(null)
+  const [error, setError] = useState('')
+  const [copied, setCopied] = useState(false)
+
+  useEffect(() => {
+    fetch(`${backendBase()}/api/tata/config`)
+      .then(r => r.json())
+      .then(setCfg)
+      .catch(e => setError((e as Error).message))
+  }, [])
+
+  function copyNumber(value: string) {
+    navigator.clipboard.writeText(value).then(() => {
+      setCopied(true)
+      setTimeout(() => setCopied(false), 1500)
+    })
+  }
+
+  if (error) return <div className="bg-destructive/10 border border-destructive/20 rounded-xl px-4 py-3 text-sm text-destructive">Failed to load TATA config: {error}</div>
+  if (!cfg)  return <div className="text-xs text-muted-foreground">Loading TATA config…</div>
+
+  const Status = ({ ok, label, detail }: { ok: boolean; label: string; detail?: string }) => (
+    <div className="flex items-start gap-2.5">
+      <span className={`mt-0.5 w-2.5 h-2.5 rounded-full flex-shrink-0 ${ok ? 'bg-green-500' : 'bg-destructive'}`} />
+      <div className="min-w-0">
+        <span className="text-sm font-semibold text-foreground">{label}</span>
+        {detail && <span className="block text-[11px] text-muted-foreground font-mono break-all">{detail}</span>}
+      </div>
+    </div>
+  )
+
+  // UI-only: show numbers with a leading "+" (without duplicating one).
+  const withPlus = (n: string | null | undefined) => (n ? '+' + n.replace(/^\+/, '') : '')
+  const displayNumber = withPlus(cfg.agent_number)
+
+  return (
+    <div className="w-full max-w-2xl mx-auto flex flex-col gap-5 py-2">
+      <div className="text-center">
+        <div className="w-16 h-16 rounded-full bg-primary flex items-center justify-center mx-auto mb-3 shadow-2xl">
+          <PhoneCall className="w-7 h-7 text-white" />
+        </div>
+        <h2 className="text-lg font-bold text-foreground">Inbound Call</h2>
+        <p className="text-sm text-muted-foreground mt-1">
+          Dial the number below to talk to the agent. TATA streams the call to Gemini Live.
+        </p>
+      </div>
+
+      {/* The number to call (TATA_AGENT_NUMBER) */}
+      {cfg.agent_number ? (
+        <div className="bg-gradient-to-br from-primary/10 to-primary/5 border border-primary/25 rounded-xl px-4 py-5 flex flex-col sm:flex-row sm:items-center gap-3">
+          <div className="w-12 h-12 rounded-full bg-primary/15 flex items-center justify-center flex-shrink-0">
+            <Phone className="w-6 h-6 text-primary" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-semibold uppercase tracking-wide text-primary">Call our agent</p>
+            <a href={`tel:${displayNumber}`} className="block text-2xl font-bold font-mono text-foreground hover:underline mt-0.5">
+              {displayNumber}
+            </a>
+            <p className="text-xs text-muted-foreground mt-1">Dial this number from any phone to talk to the AI voice agent live.</p>
+          </div>
+          <button
+            onClick={() => copyNumber(displayNumber)}
+            className="px-3 py-2 rounded-lg border border-border bg-background hover:bg-muted text-xs font-medium whitespace-nowrap"
+          >
+            {copied ? 'Copied ✓' : 'Copy number'}
+          </button>
+        </div>
+      ) : (
+        <div className="bg-yellow-500/10 border border-yellow-500/25 rounded-lg px-3 py-2 text-xs text-yellow-700 dark:text-yellow-400">
+          No inbound number configured — set <code className="font-mono">TATA_AGENT_NUMBER</code> in the backend env.
+        </div>
+      )}
+
+      {/* Config readiness — verify before deploying to the server */}
+      <div className="card flex flex-col gap-3">
+        <h3 className="text-xs font-bold text-foreground uppercase tracking-wide">Server configuration</h3>
+        <Status ok={cfg.inbound_enabled}  label="Inbound ready"  detail={displayNumber || 'TATA_AGENT_NUMBER not set'} />
+        <Status ok={cfg.outbound_enabled} label="Outbound ready" detail={cfg.outbound_enabled ? `Agent number: ${withPlus(cfg.agent_number || cfg.outbound_number)}` : 'TATA_AUTH_TOKEN + agent number required'} />
+        <Status ok={cfg.transfer_enabled} label="Transfer ready" detail={cfg.transfer_enabled ? `Transfer code: ${cfg.transfer_code}` : 'TATA_TRANSFER_CODE not set (transfers fall back to per-call code)'} />
+        <div className="border-t border-border pt-2">
+          <span className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Stream WS URL (paste in TATA portal)</span>
+          <code className="block bg-muted/50 border border-border rounded-lg px-3 py-2 text-xs font-mono text-foreground break-all mt-1">{cfg.stream_ws_url}</code>
+        </div>
+        {cfg.missing_env.length > 0 && (
+          <div className="bg-yellow-500/10 border border-yellow-500/25 rounded-lg px-3 py-2 text-xs text-yellow-700 dark:text-yellow-400">
+            Missing env vars on the backend: <code className="font-mono">{cfg.missing_env.join(', ')}</code>
+          </div>
+        )}
+      </div>
+    </div>
+  )
+}
+
 // ── Outbound Call Dialer ─────────────────────────────────────────────────────
 
 function OutboundDialer() {
@@ -3062,7 +3169,7 @@ function AgentEditor({ editing, draft, setDraft, allTools, ambience, kbCollectio
 
 // ── Main Page ────────────────────────────────────────────────────────────────
 
-type Mode = 'browser' | 'phone' | 'outbound'
+type Mode = 'browser' | 'inbound' | 'outbound'
 // ── Costing View ─────────────────────────────────────────────────────────────
 
 function CostingField({ label, value, onChange, step = 1, min = 0, suffix }: {
@@ -4096,7 +4203,7 @@ export default function GeminiPage() {
             <p className="text-sm text-muted-foreground">Real-time AI voice calls powered by Google Gemini</p>
           </div>
           <div className="flex items-center bg-muted p-1 rounded-lg border border-border gap-0.5">
-            {(['browser', 'phone', 'outbound'] as const).map(m => (
+            {(['browser', 'inbound', 'outbound'] as const).map(m => (
               <button
                 key={m}
                 onClick={() => { if (inCall) hangUp(); setMode(m) }}
@@ -4106,7 +4213,7 @@ export default function GeminiPage() {
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
-                {m === 'browser' ? 'Browser Voice' : m === 'phone' ? 'Phone Bridge' : 'Outbound Call'}
+                {m === 'browser' ? 'Browser Voice' : m === 'inbound' ? 'Inbound Call' : 'Outbound Call'}
               </button>
             ))}
           </div>
@@ -4337,22 +4444,9 @@ export default function GeminiPage() {
                   </div>
                 )}
               </>
-            ) : mode === 'phone' ? (
-              <div className="w-full flex-1 grid grid-cols-1 lg:grid-cols-2 gap-5 overflow-y-auto items-center">
-                <TwilioConfigCard />
-                <div className="card flex flex-col items-center gap-5 py-7">
-                  <div className="flex items-center gap-3 self-start">
-                    <div className="w-11 h-11 rounded-xl bg-primary/10 flex items-center justify-center">
-                      <Phone className="w-5 h-5 text-primary" />
-                    </div>
-                    <div>
-                      <h3 className="text-sm font-bold text-foreground uppercase tracking-wide">Healthcare Phone Agent</h3>
-                      <p className="text-xs text-muted-foreground mt-0.5">Powered by Twilio + Gemini Live</p>
-                    </div>
-                  </div>
-                  <div className="w-full border-t border-border" />
-                  <PhoneDialer />
-                </div>
+            ) : mode === 'inbound' ? (
+              <div className="w-full flex-1 overflow-y-auto">
+                <InboundCard />
               </div>
             ) : (
               <div className="w-full flex flex-col items-center justify-start flex-1 overflow-y-auto">

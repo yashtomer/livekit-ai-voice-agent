@@ -292,9 +292,14 @@ async def tata_config(request: Request):
         "transfer_enabled": bool(TATA_AUTH_TOKEN and TATA_TRANSFER_CODE),
         "transfer_code": TATA_TRANSFER_CODE or None,
         "outbound_number": TATA_CALLER_ID or TATA_AGENT_NUMBER or None,
+        # Inbound: the DID the caller dials to reach this agent (the Voice-Streaming
+        # number registered in the TATA portal). Sourced from TATA_AGENT_NUMBER.
+        "agent_number": TATA_AGENT_NUMBER or None,
+        "inbound_enabled": bool(VITE_BACKEND_URL and TATA_AGENT_NUMBER),
         "missing_env": [n for n, v in [
             ("VITE_BACKEND_URL", VITE_BACKEND_URL),
             ("TATA_AUTH_TOKEN", TATA_AUTH_TOKEN),
+            ("TATA_AGENT_NUMBER", TATA_AGENT_NUMBER),
             ("TATA_CALLER_ID or TATA_AGENT_NUMBER", TATA_CALLER_ID or TATA_AGENT_NUMBER),
         ] if not v],
     })
@@ -395,6 +400,10 @@ async def tata_stream(ws: WebSocket):
     # True once the caller hung up / the WS dropped — TATA has already torn the
     # leg down, so we must NOT issue a (billable, pointless) active hangup.
     ended_by_caller = {"v": False}
+    # Greeting fires once per call. On OUTBOUND the stream connects while the
+    # customer is still ringing, so we defer the greeting until the first inbound
+    # audio frame (= customer answered) instead of speaking into dead air.
+    greeting_state = {"sent": False}
     # Updated whenever a tool response carries a `transfer_number` (e.g. an agent
     # availability lookup returns {"transfer_number": "1003"}). transfer_call then
     # routes to that extension instead of the static TATA_TRANSFER_CODE.
@@ -488,9 +497,14 @@ async def tata_stream(ws: WebSocket):
                     if reconnect_count:
                         log.debug("Gemini Live reconnected (attempt %d)", reconnect_count)
 
-                    # Greeting: speak the configured first message on connect
-                    # (only on the very first session, not after a reconnect).
-                    if call_first_message and reconnect_count == 0:
+                    # Greeting: speak the configured first message exactly once per
+                    # call. INBOUND → speak immediately (the caller is already on the
+                    # line). OUTBOUND → defer until the first inbound audio frame, so
+                    # we don't start the greeting while the customer is still ringing.
+                    async def send_greeting():
+                        if greeting_state["sent"] or not call_first_message:
+                            return
+                        greeting_state["sent"] = True
                         greeting = render_template(call_first_message, build_call_context(
                             caller_id=caller_number, call_sid=tata_call_sid or stream_sid, conversation_id=log_id,
                         ))
@@ -505,6 +519,9 @@ async def tata_stream(ws: WebSocket):
                             )
                         except Exception:
                             log.exception("Failed to send greeting")
+
+                    if direction != "outbound":
+                        await send_greeting()
 
                     async def tata_to_gemini():
                         nonlocal in_state, client_closed
@@ -521,6 +538,10 @@ async def tata_stream(ws: WebSocket):
                                 payload = (msg.get("media") or {}).get("payload", "")
                                 if not payload:
                                     continue
+                                # First inbound audio on an outbound call = the customer
+                                # picked up → speak the greeting now (no-op otherwise).
+                                if not greeting_state["sent"]:
+                                    await send_greeting()
                                 mulaw = base64.b64decode(payload)
                                 pcm16k, in_state = _mulaw8k_to_pcm16k(mulaw, in_state)
                                 try:
@@ -689,10 +710,10 @@ async def tata_stream(ws: WebSocket):
                                         await _stop_filler()
                                         await _send_mixed(always_mixer.mix(response.data))
                                     if sc and sc.input_transcription and sc.input_transcription.text:
-                                        log.info("👤 %s", sc.input_transcription.text)
+                                        log.debug("👤 %s", sc.input_transcription.text)
                                         await add_transcript(log_id, "user", sc.input_transcription.text)
                                     if sc and sc.output_transcription and sc.output_transcription.text:
-                                        log.info("🤖 %s", sc.output_transcription.text)
+                                        log.debug("🤖 %s", sc.output_transcription.text)
                                         await add_transcript(log_id, "model", sc.output_transcription.text)
                                     # Deferred transfer: the agent has now finished its
                                     # hand-off line → execute the PBX transfer and tear down.
@@ -816,3 +837,8 @@ async def tata_stream(ws: WebSocket):
             await end_call(log_id, status="error", error_message=fatal_error)
         else:
             await end_call(log_id, api_key=GOOGLE_API_KEY or None)
+        log.info(
+            "📞 CALL ENDED (log_id=%s, call=%s) | by_caller=%s transferred=%s%s",
+            log_id, tata_call_sid, ended_by_caller["v"], transfer_state["active"],
+            f" error={fatal_error}" if fatal_error else "",
+        )
