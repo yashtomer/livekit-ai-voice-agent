@@ -2,7 +2,7 @@ import { useState, useEffect, useRef, useCallback, type ComponentType, type Reac
 import { useQuery } from '@tanstack/react-query'
 import api from '../api/client'
 import { Device, Call } from '@twilio/voice-sdk'
-import { Phone, PhoneOff, Mic, MicOff, ChevronDown, Settings, Home, ListVideo, Eye, X, RefreshCw, Play, Loader2, Mic2, FileCode, ArrowRight, Globe, Cloud, Server, Cpu, PhoneCall, Wrench, Bot, Plus, Pencil, Trash2, Star, Lock, Webhook, FlaskConical, IndianRupee, Volume2, VolumeX, ArrowLeft, Music, BookOpen, FileText, Upload, Search, Database, BarChart3, Clock, TrendingUp, AlertTriangle, Sparkles, Variable, Braces, Info } from 'lucide-react'
+import { Phone, PhoneOff, Mic, MicOff, ChevronDown, Settings, Home, ListVideo, Eye, X, RefreshCw, Play, Loader2, Mic2, FileCode, ArrowRight, Globe, Cloud, Server, Cpu, PhoneCall, Wrench, Bot, Plus, Pencil, Trash2, Star, Lock, Webhook, FlaskConical, IndianRupee, Volume2, VolumeX, ArrowLeft, Music, BookOpen, FileText, Upload, Search, Database, BarChart3, Clock, TrendingUp, AlertTriangle, Sparkles, Variable, Braces, Info, CalendarDays, ChevronLeft, ChevronRight, CheckCircle2, Stethoscope, User } from 'lucide-react'
 import Layout from '../components/Layout'
 import useGeminiVoice, { type GeminiStatus } from '../hooks/useGeminiVoice'
 import GeminiAvatar, { AVATARS, DEFAULT_AVATAR_URL, CAMERA_VIEWS, DEFAULT_CAMERA_VIEW, type CameraView } from '../components/GeminiAvatar'
@@ -4027,7 +4027,307 @@ function KbCollectionDetail({ collection, onBack }: { collection: KbCollection; 
   )
 }
 
-type View = 'home' | 'calls' | 'analytics' | 'voices' | 'techspecs' | 'agents' | 'tools' | 'costing' | 'kb'
+// ── Calendar view ─────────────────────────────────────────────────────────────
+
+interface CalEvent {
+  id: string
+  summary: string | null
+  description: string | null
+  start: string | null
+  end: string | null
+  doctor_id: string | null
+  doctor: string | null
+  patient: string | null
+  department: string | null
+  html_link?: string | null
+  status?: string | null
+}
+interface CalDoctor {
+  id: string
+  name: string
+  department: string
+  free_slots?: string[]
+  free_count?: number
+}
+
+function calStartOfWeek(d: Date): Date {
+  const x = new Date(d)
+  x.setHours(0, 0, 0, 0)
+  x.setDate(x.getDate() - x.getDay()) // back to Sunday
+  return x
+}
+function calAddDays(d: Date, n: number): Date {
+  const x = new Date(d)
+  x.setDate(x.getDate() + n)
+  return x
+}
+function calYmd(d: Date): string {
+  const y = d.getFullYear()
+  const m = String(d.getMonth() + 1).padStart(2, '0')
+  const day = String(d.getDate()).padStart(2, '0')
+  return `${y}-${m}-${day}`
+}
+function calSameDay(a: Date, b: Date): boolean {
+  return a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate()
+}
+const WEEKDAYS = ['SUN', 'MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT']
+const HOUR_PX = 56
+
+function calHourLabel(h: number): string {
+  const ap = h < 12 ? 'am' : 'pm'
+  const hr = h % 12 === 0 ? 12 : h % 12
+  return `${hr}:00${ap}`
+}
+function calHhmm(iso: string | null | undefined): string {
+  if (!iso) return ''
+  const d = new Date(iso)
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+function CalDetailRow({ icon: Icon, label, value }: { icon: ComponentType<{ className?: string }>; label: string; value: string }) {
+  return (
+    <div className="flex items-start gap-3">
+      <Icon className="w-4 h-4 text-muted-foreground flex-shrink-0 mt-0.5" />
+      <span className="text-xs font-semibold text-muted-foreground w-20 flex-shrink-0 pt-0.5">{label}</span>
+      <span className="text-sm text-foreground flex-1">{value}</span>
+    </div>
+  )
+}
+
+function CalendarView() {
+  const [calMode, setCalMode] = useState<'week' | 'day'>('week')
+  const [anchor, setAnchor] = useState<Date>(() => { const d = new Date(); d.setHours(0, 0, 0, 0); return d })
+  const [events, setEvents] = useState<CalEvent[]>([])
+  const [doctors, setDoctors] = useState<CalDoctor[]>([])
+  const [openHour, setOpenHour] = useState(9)
+  const [closeHour, setCloseHour] = useState(17)
+  const [connected, setConnected] = useState<boolean | null>(null)
+  const [statusMsg, setStatusMsg] = useState('')
+  const [loading, setLoading] = useState(false)
+  const [doctorFilter, setDoctorFilter] = useState('all')
+  const [selectedEvent, setSelectedEvent] = useState<CalEvent | null>(null)
+  const [now, setNow] = useState<Date>(() => new Date())
+
+  useEffect(() => {
+    const t = setInterval(() => setNow(new Date()), 60_000)
+    return () => clearInterval(t)
+  }, [])
+
+  const days = calMode === 'week'
+    ? Array.from({ length: 7 }, (_, i) => calAddDays(calStartOfWeek(anchor), i))
+    : [anchor]
+  const rangeStart = days[0]
+  const rangeEnd = calAddDays(days[days.length - 1], 1)
+
+  const loadStatus = useCallback(async () => {
+    try {
+      const r = await api.get('/google-calendar/status')
+      setConnected(!!r.data.connected)
+      if (!r.data.connected) setStatusMsg(r.data.message || 'Not connected')
+    } catch (e: any) {
+      setConnected(false); setStatusMsg(e?.response?.data?.detail || 'Status check failed')
+    }
+  }, [])
+
+  const loadEvents = useCallback(async () => {
+    setLoading(true)
+    try {
+      const r = await api.get('/google-calendar/events', { params: { start: calYmd(rangeStart), end: calYmd(rangeEnd) } })
+      setEvents(r.data.events || [])
+    } catch { setEvents([]) } finally { setLoading(false) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rangeStart.getTime(), rangeEnd.getTime()])
+
+  const loadAvailability = useCallback(async () => {
+    try {
+      const r = await api.get('/google-calendar/availability', { params: { date: calYmd(anchor) } })
+      setDoctors(r.data.doctors || [])
+      if (typeof r.data.open_hour === 'number') setOpenHour(r.data.open_hour)
+      if (typeof r.data.close_hour === 'number') setCloseHour(r.data.close_hour)
+    } catch { setDoctors([]) }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [anchor.getTime()])
+
+  useEffect(() => { loadStatus() }, [loadStatus])
+  useEffect(() => { loadEvents() }, [loadEvents])
+  useEffect(() => { loadAvailability() }, [loadAvailability])
+
+  function refresh() { loadStatus(); loadEvents(); loadAvailability() }
+  function go(dir: number) { setAnchor(a => calAddDays(a, dir * (calMode === 'week' ? 7 : 1))) }
+  function goToday() { const d = new Date(); d.setHours(0, 0, 0, 0); setAnchor(d) }
+
+  const filtered = doctorFilter === 'all' ? events : events.filter(e => e.doctor_id === doctorFilter)
+  const totalBooked = filtered.length
+  const hours = Array.from({ length: Math.max(1, closeHour - openHour) }, (_, i) => openHour + i)
+  const gridHeight = (closeHour - openHour) * HOUR_PX
+  const today = new Date()
+  const totalFree = doctors.reduce((s, d) => s + (d.free_count || 0), 0)
+
+  function eventsForDay(day: Date): CalEvent[] {
+    return filtered.filter(e => e.start && calSameDay(new Date(e.start), day))
+  }
+  function eventBox(ev: CalEvent): { top: number; height: number } {
+    const s = ev.start ? new Date(ev.start) : new Date()
+    const e = ev.end ? new Date(ev.end) : new Date(s.getTime() + 3600_000)
+    const startMin = (s.getHours() * 60 + s.getMinutes()) - openHour * 60
+    const endMin = (e.getHours() * 60 + e.getMinutes()) - openHour * 60
+    const top = Math.max(0, (startMin / 60) * HOUR_PX)
+    const height = Math.max(22, ((endMin - startMin) / 60) * HOUR_PX - 3)
+    return { top, height }
+  }
+  const nowInView = days.some(d => calSameDay(d, now)) && now.getHours() >= openHour && now.getHours() < closeHour
+  const nowTop = (((now.getHours() * 60 + now.getMinutes()) - openHour * 60) / 60) * HOUR_PX
+
+  return (
+    <div className="flex-1 px-6 py-6 flex flex-col gap-4 min-w-0 overflow-y-auto">
+      {/* Header */}
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <p className="text-[11px] font-bold uppercase tracking-wider text-primary mb-0.5">Schedule</p>
+          <h1 className="text-2xl font-bold text-foreground">Calendar</h1>
+          <p className="text-sm text-muted-foreground">Booked appointments and live availability, synced with Google Calendar.</p>
+        </div>
+        <div className="flex items-center gap-2">
+          <span className="px-2.5 py-1 rounded-full bg-green-500/10 text-green-600 dark:text-green-400 text-xs font-bold border border-green-500/20">{totalBooked} BOOKED</span>
+          <span className={`flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold border ${connected ? 'bg-green-500/10 text-green-600 dark:text-green-400 border-green-500/20' : connected === false ? 'bg-destructive/10 text-destructive border-destructive/20' : 'bg-muted text-muted-foreground border-border'}`} title={statusMsg}>
+            <span className={`w-1.5 h-1.5 rounded-full ${connected ? 'bg-green-500' : connected === false ? 'bg-destructive' : 'bg-muted-foreground'}`} />
+            {connected ? 'Google connected' : connected === false ? 'Disconnected' : 'Checking…'}
+          </span>
+          <select value={doctorFilter} onChange={e => setDoctorFilter(e.target.value)} className="appearance-none bg-background border border-border rounded-lg px-3 py-1.5 text-sm text-foreground focus:outline-none focus:border-primary">
+            <option value="all">All doctors</option>
+            {doctors.map(d => <option key={d.id} value={d.id}>{d.name}</option>)}
+          </select>
+          <button onClick={refresh} className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-border text-sm text-muted-foreground hover:text-foreground hover:bg-muted transition-all">
+            <RefreshCw className={`w-3.5 h-3.5 ${loading ? 'animate-spin' : ''}`} /> Refresh
+          </button>
+        </div>
+      </div>
+
+      {connected === false && (
+        <div className="bg-destructive/10 border border-destructive/25 rounded-xl px-4 py-3 text-sm text-destructive">
+          Google Calendar is not connected: {statusMsg}. Check GOOGLE_CLIENT_ID / GOOGLE_CLIENT_SECRET / GOOGLE_REFRESH_TOKEN in the backend environment.
+        </div>
+      )}
+
+      <div className="flex gap-5 flex-1 min-h-0 flex-wrap xl:flex-nowrap">
+        {/* Calendar card */}
+        <div className="flex-1 min-w-[32rem] card flex flex-col gap-3 p-4">
+          {/* Toolbar */}
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="flex items-center gap-1">
+              <button onClick={() => go(-1)} className="w-9 h-9 rounded-lg border border-border flex items-center justify-center text-muted-foreground hover:bg-muted"><ChevronLeft className="w-4 h-4" /></button>
+              <button onClick={() => go(1)} className="w-9 h-9 rounded-lg border border-border flex items-center justify-center text-muted-foreground hover:bg-muted"><ChevronRight className="w-4 h-4" /></button>
+              <button onClick={goToday} className="ml-1 px-4 h-9 rounded-lg border border-border text-sm font-semibold text-foreground hover:bg-muted">Today</button>
+            </div>
+            <h2 className="text-base font-bold text-foreground">
+              {calMode === 'week'
+                ? `${rangeStart.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} – ${days[6].toLocaleDateString(undefined, { month: 'short', day: 'numeric', year: 'numeric' })}`
+                : anchor.toLocaleDateString(undefined, { weekday: 'long', month: 'long', day: 'numeric', year: 'numeric' })}
+            </h2>
+            <div className="flex items-center bg-muted p-1 rounded-lg border border-border gap-0.5">
+              {(['week', 'day'] as const).map(m => (
+                <button key={m} onClick={() => setCalMode(m)} className={`px-4 py-1.5 text-sm font-bold rounded-md transition-all capitalize ${calMode === m ? 'bg-destructive text-white shadow-sm' : 'text-muted-foreground hover:text-foreground'}`}>{m}</button>
+              ))}
+            </div>
+          </div>
+
+          {/* Grid */}
+          <div className="border border-border rounded-xl overflow-hidden">
+            {/* Day header row */}
+            <div className="grid border-b border-border bg-muted/30" style={{ gridTemplateColumns: `4rem repeat(${days.length}, minmax(0,1fr))` }}>
+              <div className="border-r border-border" />
+              {days.map((d, i) => {
+                const isToday = calSameDay(d, today)
+                return (
+                  <div key={i} className={`text-center py-2 border-r border-border last:border-r-0 ${isToday ? 'bg-destructive/5' : ''}`}>
+                    <span className={`text-xs font-bold uppercase tracking-wide ${isToday ? 'text-destructive' : 'text-muted-foreground'}`}>{WEEKDAYS[d.getDay()]} {d.getMonth() + 1}/{d.getDate()}</span>
+                  </div>
+                )
+              })}
+            </div>
+            {/* Time grid body */}
+            <div className="grid relative" style={{ gridTemplateColumns: `4rem repeat(${days.length}, minmax(0,1fr))`, height: `${gridHeight}px` }}>
+              {/* Time gutter */}
+              <div className="relative border-r border-border">
+                {hours.map((h, i) => (
+                  <div key={h} className="absolute left-0 right-1 text-right pr-2 -translate-y-2 text-[11px] text-muted-foreground" style={{ top: `${i * HOUR_PX}px` }}>{calHourLabel(h)}</div>
+                ))}
+              </div>
+              {/* Day columns */}
+              {days.map((day, di) => {
+                const isToday = calSameDay(day, today)
+                return (
+                  <div key={di} className={`relative border-r border-border last:border-r-0 ${isToday ? 'bg-destructive/[0.03]' : ''}`}>
+                    {hours.map((h, i) => (
+                      <div key={h} className="absolute left-0 right-0 border-b border-border/60" style={{ top: `${(i + 1) * HOUR_PX}px` }} />
+                    ))}
+                    {eventsForDay(day).map(ev => {
+                      const box = eventBox(ev)
+                      return (
+                        <button key={ev.id} onClick={() => setSelectedEvent(ev)} className="absolute left-1 right-1 rounded-md bg-green-500 hover:bg-green-600 text-white px-2 py-1 text-left shadow-sm overflow-hidden transition-colors" style={{ top: `${box.top}px`, height: `${box.height}px` }}>
+                          <p className="text-[11px] font-bold leading-tight truncate">{ev.doctor || ev.summary}</p>
+                          {ev.patient && <p className="text-[10px] opacity-90 leading-tight truncate">{ev.patient}</p>}
+                          <p className="text-[10px] opacity-80 leading-tight">{calHhmm(ev.start)} – {calHhmm(ev.end)}</p>
+                        </button>
+                      )
+                    })}
+                    {isToday && nowInView && (
+                      <div className="absolute left-0 right-0 z-10 pointer-events-none" style={{ top: `${nowTop}px` }}>
+                        <div className="relative">
+                          <div className="absolute -left-1 -top-1 w-2 h-2 rounded-full bg-destructive" />
+                          <div className="border-t-2 border-destructive" />
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                )
+              })}
+            </div>
+          </div>
+        </div>
+      </div>
+
+      {/* Appointment details modal */}
+      {selectedEvent && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4" onClick={() => setSelectedEvent(null)}>
+          <div className="bg-card border border-border rounded-2xl shadow-xl w-full max-w-md animate-fade-in" onClick={e => e.stopPropagation()}>
+            <div className="flex items-start justify-between p-5 border-b border-border">
+              <div className="flex items-center gap-3">
+                <div className="w-10 h-10 rounded-xl bg-green-500/10 flex items-center justify-center"><CalendarDays className="w-5 h-5 text-green-600 dark:text-green-400" /></div>
+                <div>
+                  <h3 className="text-base font-bold text-foreground">{selectedEvent.doctor || selectedEvent.summary}</h3>
+                  <p className="text-xs text-muted-foreground">{selectedEvent.department || 'Appointment'}</p>
+                </div>
+              </div>
+              <button onClick={() => setSelectedEvent(null)} className="w-8 h-8 rounded-lg flex items-center justify-center text-muted-foreground hover:bg-muted"><X className="w-4 h-4" /></button>
+            </div>
+            <div className="p-5 space-y-3">
+              <CalDetailRow icon={User} label="Patient" value={selectedEvent.patient || '—'} />
+              <CalDetailRow icon={Stethoscope} label="Doctor" value={selectedEvent.doctor || '—'} />
+              <CalDetailRow icon={Clock} label="When" value={selectedEvent.start ? `${new Date(selectedEvent.start).toLocaleDateString(undefined, { weekday: 'long', month: 'short', day: 'numeric' })}, ${calHhmm(selectedEvent.start)} – ${calHhmm(selectedEvent.end)}` : '—'} />
+              {selectedEvent.department && <CalDetailRow icon={Webhook} label="Dept" value={selectedEvent.department} />}
+              {selectedEvent.description && (
+                <div className="pt-1">
+                  <p className="text-[11px] font-bold uppercase tracking-wide text-muted-foreground mb-1">Notes</p>
+                  <p className="text-sm text-foreground whitespace-pre-wrap bg-muted/40 rounded-lg p-2.5 border border-border">{selectedEvent.description}</p>
+                </div>
+              )}
+            </div>
+            {selectedEvent.html_link && (
+              <div className="p-5 pt-0">
+                <a href={selectedEvent.html_link} target="_blank" rel="noreferrer" className="flex items-center justify-center gap-2 w-full py-2.5 rounded-lg bg-primary text-primary-foreground text-sm font-semibold hover:bg-primary/90 transition-all">
+                  Open in Google Calendar <ArrowRight className="w-4 h-4" />
+                </a>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  )
+}
+
+type View = 'home' | 'calls' | 'analytics' | 'voices' | 'techspecs' | 'agents' | 'tools' | 'costing' | 'kb' | 'calendar'
 
 export default function GeminiPage() {
   const templates = useAgentTemplates(TEMPLATES)
@@ -4169,6 +4469,17 @@ export default function GeminiPage() {
             Knowledge Base
           </button>
           <button
+            onClick={() => { if (inCall) hangUp(); setView('calendar') }}
+            className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-all ${
+              view === 'calendar'
+                ? 'bg-primary/10 text-primary border border-primary/20'
+                : 'text-muted-foreground hover:text-foreground hover:bg-muted/50'
+            }`}
+          >
+            <CalendarDays className="w-4 h-4" />
+            Calendar
+          </button>
+          <button
             onClick={() => { if (inCall) hangUp(); setView('costing') }}
             className={`flex items-center gap-2.5 px-3 py-2 rounded-lg text-sm font-medium transition-all ${
               view === 'costing'
@@ -4193,7 +4504,7 @@ export default function GeminiPage() {
         </aside>
 
         {/* ─── Main content ─── */}
-        {view === 'calls' ? <CallsView /> : view === 'analytics' ? <AnalyticsView /> : view === 'voices' ? <VoicesView /> : view === 'techspecs' ? <TechSpecsView /> : view === 'agents' ? <AgentsView /> : view === 'tools' ? <ToolsView /> : view === 'costing' ? <CostingView /> : view === 'kb' ? <KnowledgeBaseView /> : (
+        {view === 'calls' ? <CallsView /> : view === 'analytics' ? <AnalyticsView /> : view === 'voices' ? <VoicesView /> : view === 'techspecs' ? <TechSpecsView /> : view === 'agents' ? <AgentsView /> : view === 'tools' ? <ToolsView /> : view === 'costing' ? <CostingView /> : view === 'kb' ? <KnowledgeBaseView /> : view === 'calendar' ? <CalendarView /> : (
         <div className="flex-1 px-6 py-6 flex flex-col gap-4 min-w-0">
 
         {/* Page header + mode switcher */}
@@ -4224,7 +4535,7 @@ export default function GeminiPage() {
 
           {/* LEFT — config panel (only in browser mode) */}
           {mode === 'browser' && (
-            <div className="w-[36rem] flex-shrink-0 flex flex-col gap-4">
+            <div className="w-[28rem] flex-shrink-0 flex flex-col gap-4">
               <div className="card flex flex-col gap-4 flex-1">
                 <h2 className="text-sm font-bold text-foreground uppercase tracking-wide">Agent Config</h2>
 
@@ -4342,7 +4653,7 @@ export default function GeminiPage() {
                 )}
 
                 {/* Avatar stage — controls float in the surrounding whitespace */}
-                <div className="relative flex-1 w-full flex items-center justify-center min-h-0">
+                <div className="relative flex-1 w-full flex items-center justify-center min-h-0 overflow-hidden">
                   {/* Avatar picker — top-left */}
                   <div className="absolute top-3 left-3 z-10 flex flex-col gap-1.5">
                     <span className="text-[10px] font-bold uppercase tracking-wider text-muted-foreground/60 pl-1">Avatar</span>
@@ -4361,7 +4672,7 @@ export default function GeminiPage() {
                     ))}
                   </div>
 
-                  <GeminiAvatar inCall={inCall} status={status} audioSinkRef={audioSinkRef} audioInterruptRef={audioInterruptRef} avatarUrl={avatarUrl} cameraView={cameraView} width={340} height={460} mood={inCall ? (sentiment?.label ?? null) : null} />
+                  <GeminiAvatar inCall={inCall} status={status} audioSinkRef={audioSinkRef} audioInterruptRef={audioInterruptRef} avatarUrl={avatarUrl} cameraView={cameraView} width={560} height={520} mood={inCall ? (sentiment?.label ?? null) : null} />
 
                   {/* Camera framing — bottom-center segmented control */}
                   <div className="absolute bottom-3 left-1/2 -translate-x-1/2 z-10 flex items-center gap-1 bg-card/70 backdrop-blur border border-border rounded-full p-1 shadow-sm">

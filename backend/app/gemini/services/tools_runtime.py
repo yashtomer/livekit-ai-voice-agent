@@ -15,6 +15,7 @@ For a given agent ID (or list of tool IDs), this module:
 """
 from __future__ import annotations
 
+import inspect
 import logging
 import re
 from typing import Any, Optional
@@ -371,7 +372,10 @@ async def dispatch_tool_call(tool_ids: list[int], name: str, args: dict[str, Any
             fn = PYTHON_TOOL_REGISTRY.get(name)
             if fn:
                 try:
-                    return fn(**resolved)
+                    out = fn(**resolved)
+                    if inspect.isawaitable(out):
+                        out = await out
+                    return out
                 except Exception as e:
                     log.exception("Builtin tool %s failed", name)
                     return {"status": "error", "message": str(e)}
@@ -384,7 +388,10 @@ async def dispatch_tool_call(tool_ids: list[int], name: str, args: dict[str, Any
     fn = PYTHON_TOOL_REGISTRY.get(name)
     if fn:
         try:
-            return fn(**(args or {}))
+            out = fn(**(args or {}))
+            if inspect.isawaitable(out):
+                out = await out
+            return out
         except Exception as e:
             return {"status": "error", "message": str(e)}
 
@@ -450,6 +457,121 @@ async def seed_builtin_tools() -> None:
                     agent.tool_ids = current
                     await db.commit()
                     log.info("Linked builtin tool to healthcare_booking agent")
+
+            # ── book_appointment builtin (Google Calendar booking) ──
+            booking = (await db.execute(
+                select(GeminiTool).where(GeminiTool.slug == "book_appointment")
+            )).scalar_one_or_none()
+            if not booking:
+                booking = GeminiTool(
+                    slug="book_appointment",
+                    name="Book Appointment",
+                    description=(
+                        "Book a confirmed appointment on the clinic's Google Calendar. Collect the "
+                        "patient's full name, the doctor, the department, and a date and time within "
+                        "clinic hours (09:00–17:00), then call this — usually near the end of the call — "
+                        "to finalise the booking."
+                    ),
+                    http_method="GET",
+                    url=None,
+                    headers={},
+                    parameters=[
+                        {"name": "patient_name", "type": "string", "required": True,
+                         "description": "The caller / patient's full name."},
+                        {"name": "doctor", "type": "string", "required": True,
+                         "description": "Doctor name, e.g. 'Dr. John Smith' (or just 'Smith')."},
+                        {"name": "date", "type": "string", "required": True,
+                         "description": "Appointment date as YYYY-MM-DD."},
+                        {"name": "time", "type": "string", "required": True,
+                         "description": "Start time within 09:00–17:00, e.g. '14:00' or '2pm'."},
+                        {"name": "department", "type": "string", "required": False,
+                         "description": "Department/specialty (optional; inferred from the doctor if omitted)."},
+                        {"name": "reason", "type": "string", "required": False,
+                         "description": "Short reason for the visit (optional)."},
+                    ],
+                    response_schema=[
+                        {"key": "status",   "type": "string", "description": "'ok' when booked, 'unavailable' if the slot is taken, 'error' otherwise."},
+                        {"key": "message",  "type": "string", "description": "Human-readable confirmation or error to read out to the caller."},
+                        {"key": "event_id", "type": "string", "description": "Google Calendar event id when status=ok."},
+                        {"key": "start",    "type": "string", "description": "Confirmed start time (ISO 8601) when status=ok."},
+                    ],
+                    is_builtin=True,
+                )
+                db.add(booking)
+                await db.commit()
+                await db.refresh(booking)
+                log.info("Seeded builtin tool: book_appointment (id=%d)", booking.id)
+
+            # Ensure book_appointment exposes the `summary` param (added later —
+            # patch pre-existing rows so the agent can store the call outcome).
+            bp_params = list(booking.parameters or [])
+            if not any(p.get("name") == "summary" for p in bp_params):
+                bp_params.append({
+                    "name": "summary", "type": "string", "required": False,
+                    "description": "A short recap / outcome of the call to store on the appointment (e.g. what the caller wanted, any notes).",
+                })
+                booking.parameters = bp_params
+                await db.commit()
+                log.info("Added 'summary' param to book_appointment tool")
+
+            # Link book_appointment to the healthcare_booking agent.
+            hb_agent = (await db.execute(
+                select(GeminiAgent).where(GeminiAgent.slug == "healthcare_booking")
+            )).scalar_one_or_none()
+            if hb_agent:
+                current = list(hb_agent.tool_ids or [])
+                if booking.id not in current:
+                    current.append(booking.id)
+                    hb_agent.tool_ids = current
+                    await db.commit()
+                    log.info("Linked book_appointment to healthcare_booking agent")
+
+            # ── book_calendar_event builtin (generic, domain-agnostic booking) ──
+            # Not auto-linked to any agent — attach it to whichever agents you
+            # want (real estate, salon, etc.) from the Agents → Tools UI.
+            generic = (await db.execute(
+                select(GeminiTool).where(GeminiTool.slug == "book_calendar_event")
+            )).scalar_one_or_none()
+            if not generic:
+                generic = GeminiTool(
+                    slug="book_calendar_event",
+                    name="Book Calendar Event",
+                    description=(
+                        "Book a generic appointment / event on the shared Google Calendar for ANY "
+                        "purpose (property viewing, demo, callback, salon slot, etc.). No doctor or "
+                        "clinic rules — use this for non-medical agents. Collect a short title, the "
+                        "person's name, and a date and time, then call this (usually near the end of "
+                        "the call) to create the event."
+                    ),
+                    http_method="GET",
+                    url=None,
+                    headers={},
+                    parameters=[
+                        {"name": "title", "type": "string", "required": True,
+                         "description": "Short title/subject for the event, e.g. 'Property viewing — 3BHK Whitefield' or 'Product demo'."},
+                        {"name": "date", "type": "string", "required": True,
+                         "description": "Event date as YYYY-MM-DD."},
+                        {"name": "time", "type": "string", "required": True,
+                         "description": "Start time, e.g. '14:30' or '2:30pm'."},
+                        {"name": "attendee_name", "type": "string", "required": False,
+                         "description": "Name of the person the appointment is for."},
+                        {"name": "duration_minutes", "type": "integer", "required": False,
+                         "description": "Length of the event in minutes (default 60)."},
+                        {"name": "summary", "type": "string", "required": False,
+                         "description": "A short recap / outcome of the call to store in the event description."},
+                    ],
+                    response_schema=[
+                        {"key": "status",   "type": "string", "description": "'ok' when booked, 'error' otherwise."},
+                        {"key": "message",  "type": "string", "description": "Human-readable confirmation or error to read out to the caller."},
+                        {"key": "event_id", "type": "string", "description": "Google Calendar event id when status=ok."},
+                        {"key": "start",    "type": "string", "description": "Confirmed start time (ISO 8601) when status=ok."},
+                    ],
+                    is_builtin=True,
+                )
+                db.add(generic)
+                await db.commit()
+                await db.refresh(generic)
+                log.info("Seeded builtin tool: book_calendar_event (id=%d)", generic.id)
 
             # ── transfer_call builtin (warm hand-off to a human agent) ──
             transfer = (await db.execute(

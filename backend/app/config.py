@@ -38,6 +38,19 @@ LIVEKIT_PUBLIC_URL: str = os.environ.get("LIVEKIT_PUBLIC_URL", LIVEKIT_URL)
 LIVEKIT_API_KEY: str = os.environ.get("LIVEKIT_API_KEY", "devkey")
 LIVEKIT_API_SECRET: str = os.environ.get("LIVEKIT_API_SECRET", "secret")
 AGENT_NAME: str = os.environ.get("AGENT_NAME", "cost-calc-agent")
+
+# ── Google Calendar (appointment booking) ────────────────────────────────────
+# OAuth credentials for a single shared Google account. The refresh token is
+# exchanged server-side for short-lived access tokens (see services/google_calendar.py).
+# All bookings land on GOOGLE_CALENDAR_ID (defaults to the account's primary calendar).
+GOOGLE_CLIENT_ID: str = os.environ.get("GOOGLE_CLIENT_ID", "")
+GOOGLE_CLIENT_SECRET: str = os.environ.get("GOOGLE_CLIENT_SECRET", "")
+GOOGLE_REFRESH_TOKEN: str = os.environ.get("GOOGLE_REFRESH_TOKEN", "")
+GOOGLE_CALENDAR_ID: str = os.environ.get("GOOGLE_CALENDAR_ID", "primary")
+# Business hours / slot config used to compute doctor availability.
+CALENDAR_TIMEZONE: str = os.environ.get("CALENDAR_TIMEZONE", "Asia/Kolkata")
+CALENDAR_OPEN_HOUR: int = int(os.environ.get("CALENDAR_OPEN_HOUR", "9"))   # 09:00
+CALENDAR_CLOSE_HOUR: int = int(os.environ.get("CALENDAR_CLOSE_HOUR", "17"))  # 17:00
 OLLAMA_URL: str = os.environ.get("OLLAMA_URL", "http://localhost:11434")
 VOICEBOX_URL: str = os.environ.get("VOICEBOX_URL", "http://localhost:17493")
 PIPER_URL: str = os.environ.get("PIPER_URL", "http://localhost:8200/v1")

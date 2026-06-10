@@ -143,8 +143,11 @@ async def end_call(
     if status == "ended" and api_key and transcript:
         try:
             await _generate_summary(call_id, transcript, api_key)
-        except Exception:
-            log.exception("gemini_logger post-call summary failed")
+        except Exception as exc:
+            # Non-fatal: the call/transcript are already saved, only the AI summary
+            # is missing. The summary model (gemini-2.5-flash) periodically returns
+            # 503 "high demand" — log one concise line, not a scary stack trace.
+            log.warning("post-call summary skipped for call %d: %s", call_id, str(exc)[:160])
 
 
 # ── Post-call AI analysis ─────────────────────────────────────────────────────
@@ -179,19 +182,38 @@ async def _generate_summary(call_id: int, transcript: list[dict], api_key: str) 
     if not convo.strip():
         return
 
+    import asyncio
+
     from google import genai
     from google.genai import types
 
     client = genai.Client(api_key=api_key)
-    resp = await client.aio.models.generate_content(
-        model=SUMMARY_MODEL,
-        contents=convo,
-        config=types.GenerateContentConfig(
-            system_instruction=_SUMMARY_INSTRUCTION,
-            response_mime_type="application/json",
-            temperature=0.2,
-        ),
-    )
+
+    # The summary model occasionally returns 503 "high demand". Retry a few times
+    # with backoff before giving up — the summary is best-effort but cheap to retry.
+    resp = None
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            resp = await client.aio.models.generate_content(
+                model=SUMMARY_MODEL,
+                contents=convo,
+                config=types.GenerateContentConfig(
+                    system_instruction=_SUMMARY_INSTRUCTION,
+                    response_mime_type="application/json",
+                    temperature=0.2,
+                ),
+            )
+            break
+        except Exception as exc:
+            last_exc = exc
+            msg = str(exc)
+            retryable = "503" in msg or "UNAVAILABLE" in msg or "high demand" in msg or "overloaded" in msg
+            if not retryable or attempt == 2:
+                raise
+            await asyncio.sleep(1.5 * (attempt + 1))
+    if resp is None:  # defensive: loop always either breaks or raises
+        raise last_exc or RuntimeError("summary generation failed")
 
     import json as _json
     raw = (resp.text or "").strip()

@@ -17,7 +17,7 @@ from .services.auth import hash_password
 from .seed_data import SEED_MODELS, compute_profile_for
 from .routes import auth, models_route, token_route, admin_route, config_routes, tts_route, fx_route, setup_route, internal_route
 from .ultravox.routes import ultravox, whatsapp
-from .gemini.routes import call as gemini_call, calls as gemini_calls, twilio_bridge, vobiz_bridge, tata_bridge, voice_samples, agents as gemini_agents, tools as gemini_tools_route, ambience as gemini_ambience, kb as gemini_kb_route
+from .gemini.routes import call as gemini_call, calls as gemini_calls, twilio_bridge, vobiz_bridge, tata_bridge, voice_samples, agents as gemini_agents, tools as gemini_tools_route, ambience as gemini_ambience, kb as gemini_kb_route, google_calendar as gemini_calendar
 from .services import model_setup, room_config_cache
 
 from .log_buffer import install as _install_log_buffer
@@ -311,6 +311,7 @@ app.include_router(gemini_agents.router,  prefix="/api/agents", tags=["agents"])
 app.include_router(gemini_tools_route.router, prefix="/api/tools", tags=["tools"])
 app.include_router(gemini_ambience.router, prefix="/api/ambience", tags=["ambience"])
 app.include_router(gemini_kb_route.router, prefix="/api/kb", tags=["kb"])
+app.include_router(gemini_calendar.router, prefix="/api/google-calendar", tags=["google-calendar"])
 
 
 @app.get("/health")
