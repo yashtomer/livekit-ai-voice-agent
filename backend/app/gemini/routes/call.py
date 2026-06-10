@@ -95,7 +95,12 @@ def _make_live_config(system_prompt: str, language: str, voice: str = "Aoede", t
     from google.genai import types
 
     lang_name = LANGUAGE_NAMES.get(language, "English")
-    lang_note = f"\n\nCRITICAL: Respond ONLY in {lang_name}. Every word must be in {lang_name}."
+    lang_note = (
+        f"\n\nLANGUAGE: Begin the conversation in {lang_name}. If the caller speaks in a "
+        f"different language at any point, immediately switch and continue entirely in that "
+        f"language, matching whatever language the caller is currently using. Always reply in "
+        f"the caller's current language — never refuse a language or say you can only speak {lang_name}."
+    )
     cfg = types.LiveConnectConfig(
         response_modalities=["AUDIO"],
         input_audio_transcription=types.AudioTranscriptionConfig(),

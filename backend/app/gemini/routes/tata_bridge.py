@@ -149,7 +149,12 @@ def _make_live_config(system_prompt: str, language: str, voice: str = "Aoede", t
         ),
         system_instruction=types.Content(
             parts=[types.Part(
-                text=system_prompt + clock_block + f"\n\nCRITICAL: Respond ONLY in {lang_name}."
+                text=system_prompt + clock_block + (
+                    f"\n\nLANGUAGE: Begin in {lang_name}. If the caller speaks another language at "
+                    f"any point, immediately switch and continue entirely in that language, always "
+                    f"matching the caller's current language. Never refuse a language or say you can "
+                    f"only speak {lang_name}."
+                )
             )]
         ),
     )
