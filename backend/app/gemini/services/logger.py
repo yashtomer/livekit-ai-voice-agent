@@ -20,6 +20,50 @@ log = logging.getLogger("gemini_logger")
 
 SUMMARY_MODEL = os.environ.get("GEMINI_SUMMARY_MODEL", "gemini-2.5-flash")
 
+# Categorized end reasons surfaced in the calls UI (gemini_call_logs.end_reason).
+REASON_COMPLETED          = "COMPLETED"            # call finished normally
+REASON_CLIENT_DISCONNECTED = "CLIENT_DISCONNECTED"  # caller/browser hung up
+REASON_AGENT_ENDED        = "AGENT_ENDED"          # AI agent ended the call
+REASON_NETWORK_ISSUE      = "NETWORK_ISSUE"        # socket drop / connection reset / timeout
+REASON_MODEL_ERROR        = "MODEL_ERROR"          # Gemini 5xx / unavailable / overloaded
+REASON_INTERNAL_ERROR     = "INTERNAL_ERROR"       # anything else
+
+# Reasons that warrant a "we'll call you back" WhatsApp to the customer.
+_WHATSAPP_REASONS = {REASON_NETWORK_ISSUE, REASON_MODEL_ERROR, REASON_INTERNAL_ERROR}
+
+
+def classify_disconnect(exc: BaseException | None) -> str:
+    """Map a teardown exception to a categorized end reason.
+
+    Mirrors the reconnect-classification the bridges already use:
+      - socket drops (1006/1011, ConnectionClosed/Reset, BrokenPipe, timeouts) → NETWORK_ISSUE
+      - Gemini 5xx / unavailable / overloaded                                   → MODEL_ERROR
+      - everything else                                                          → INTERNAL_ERROR
+    Pass exc=None for a clean finish → COMPLETED.
+    """
+    if exc is None:
+        return REASON_COMPLETED
+    code = getattr(exc, "code", None)
+    msg = str(exc)
+    exc_type = type(exc).__name__
+    if (
+        "ConnectionClosed" in exc_type
+        or "APIError" in exc_type
+        or isinstance(exc, (ConnectionResetError, BrokenPipeError, TimeoutError))
+        or "TimeoutError" in exc_type
+        or code in (1006, 1011)
+        or "abnormal closure" in msg or "1006" in msg or "1011" in msg
+    ):
+        return REASON_NETWORK_ISSUE
+    if (
+        "ServerError" in exc_type
+        or code in (500, 503)
+        or "503" in msg or "500" in msg
+        or "UNAVAILABLE" in msg or "high demand" in msg or "overloaded" in msg
+    ):
+        return REASON_MODEL_ERROR
+    return REASON_INTERNAL_ERROR
+
 
 async def start_call(
     *,
@@ -114,12 +158,18 @@ async def end_call(
     call_id: Optional[int],
     *,
     status: str = "ended",
+    reason: Optional[str] = None,
     error_message: Optional[str] = None,
     api_key: Optional[str] = None,
 ) -> None:
     if not call_id:
         return
+    # Default the categorized reason from the coarse status when not supplied.
+    if reason is None:
+        reason = REASON_INTERNAL_ERROR if status == "error" else REASON_COMPLETED
     transcript = None
+    call_type = None
+    phone_number = None
     try:
         async with SessionLocal() as db:
             row = (await db.execute(select(GeminiCallLog).where(GeminiCallLog.id == call_id))).scalar_one_or_none()
@@ -128,16 +178,28 @@ async def end_call(
             ended = datetime.utcnow()
             row.ended_at = ended
             row.status = status
+            row.end_reason = reason
             if error_message:
                 row.error_message = error_message[:1000]
             if row.started_at:
                 started = row.started_at
                 row.duration_s = max(0, int((ended - started).total_seconds()))
             transcript = list(row.transcript or [])
+            call_type = row.call_type
+            phone_number = row.phone_number
             await db.commit()
     except Exception:
         log.exception("gemini_logger.end_call failed")
         return
+
+    # Non-browser call dropped on an error → notify the customer we'll call back.
+    # Best-effort: a failed WhatsApp send must never affect call teardown.
+    if call_type and call_type != "browser" and reason in _WHATSAPP_REASONS and phone_number:
+        try:
+            from .whatsapp import send_whatsapp_template
+            await send_whatsapp_template(phone_number)
+        except Exception as exc:
+            log.warning("WhatsApp disconnect notify skipped for call %d: %s", call_id, str(exc)[:160])
 
     # Best-effort post-call analysis. Never let a failure here affect the call.
     if status == "ended" and api_key and transcript:

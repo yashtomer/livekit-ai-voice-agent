@@ -928,6 +928,7 @@ type CallSummary = {
   language: string | null
   voice: string | null
   status: string
+  end_reason: string | null
   started_at: string | null
   ended_at: string | null
   duration_s: number | null
@@ -959,6 +960,25 @@ const SENTIMENT_BADGE: Record<string, string> = {
   positive: 'bg-green-500/10 text-green-600 dark:text-green-400 border-green-500/20',
   neutral:  'bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20',
   negative: 'bg-destructive/10 text-destructive border-destructive/20',
+}
+
+// Human-readable label + badge colour for gemini_call_logs.end_reason.
+const END_REASON_LABEL: Record<string, string> = {
+  COMPLETED:           'Completed',
+  CLIENT_DISCONNECTED: 'Client Disconnected',
+  AGENT_ENDED:         'Agent Ended',
+  NETWORK_ISSUE:       'Network Issue',
+  MODEL_ERROR:         'Server Error',
+  INTERNAL_ERROR:      'Internal Error',
+}
+
+const END_REASON_BADGE: Record<string, string> = {
+  COMPLETED:           'bg-green-500/10 text-green-600 dark:text-green-400 border-green-500/20',
+  CLIENT_DISCONNECTED: 'bg-slate-500/10 text-slate-600 dark:text-slate-400 border-slate-500/20',
+  AGENT_ENDED:         'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20',
+  NETWORK_ISSUE:       'bg-amber-500/10 text-amber-600 dark:text-amber-400 border-amber-500/20',
+  MODEL_ERROR:         'bg-destructive/10 text-destructive border-destructive/20',
+  INTERNAL_ERROR:      'bg-destructive/10 text-destructive border-destructive/20',
 }
 
 const CALLS_PAGE_SIZE = 20
@@ -1255,14 +1275,15 @@ function CallsView() {
               <th className="px-4 py-3 font-semibold border-b border-border text-center">Turns</th>
               <th className="px-4 py-3 font-semibold border-b border-border">Sentiment</th>
               <th className="px-4 py-3 font-semibold border-b border-border">Status</th>
+              <th className="px-4 py-3 font-semibold border-b border-border">End Reason</th>
               <th className="px-4 py-3 font-semibold border-b border-border text-right">Actions</th>
             </tr>
           </thead>
           <tbody>
             {loading && items.length === 0 ? (
-              <tr><td colSpan={10} className="px-4 py-10 text-center text-muted-foreground">Loading…</td></tr>
+              <tr><td colSpan={11} className="px-4 py-10 text-center text-muted-foreground">Loading…</td></tr>
             ) : items.length === 0 ? (
-              <tr><td colSpan={10} className="px-4 py-10 text-center text-muted-foreground">No calls yet.</td></tr>
+              <tr><td colSpan={11} className="px-4 py-10 text-center text-muted-foreground">No calls yet.</td></tr>
             ) : items.map(row => (
               <tr key={row.id} className="hover:bg-muted/30 transition-colors group">
                 <td className="px-4 py-3 font-mono text-xs text-muted-foreground border-b border-border/40">#{row.id}</td>
@@ -1294,6 +1315,13 @@ function CallsView() {
                     }`} />
                     {row.status}
                   </span>
+                </td>
+                <td className="px-4 py-3 border-b border-border/40">
+                  {row.end_reason ? (
+                    <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-medium border ${END_REASON_BADGE[row.end_reason] || 'bg-muted text-foreground border-border'}`}>
+                      {END_REASON_LABEL[row.end_reason] || row.end_reason}
+                    </span>
+                  ) : <span className="text-muted-foreground">—</span>}
                 </td>
                 <td className="px-4 py-3 text-right border-b border-border/40">
                   <button

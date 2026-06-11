@@ -50,7 +50,11 @@ from fastapi.responses import JSONResponse
 
 from ...models.user import User
 from ...routes.auth import get_current_user
-from ..services.logger import start_call, add_transcript, add_tool_event, end_call
+from ..services.logger import (
+    start_call, add_transcript, add_tool_event, end_call,
+    classify_disconnect, REASON_AGENT_ENDED, REASON_CLIENT_DISCONNECTED,
+    REASON_MODEL_ERROR, REASON_COMPLETED,
+)
 from ..services.agents_store import get_default_phone_agent
 from ..services.tools_runtime import build_call_context, build_gemini_tools, dispatch_tool_call, render_template
 from ..agents import DEFAULT_PHONE_AGENT
@@ -484,6 +488,11 @@ async def tata_stream(ws: WebSocket):
 
     client_closed = False
     fatal_error: str | None = None
+    fatal_exc: BaseException | None = None
+    # True once Gemini stays unavailable past MAX_SERVER_ERROR_STREAK → MODEL_ERROR.
+    model_unavailable = {"v": False}
+    # True once the agent invokes the end_call tool → AGENT_ENDED.
+    agent_ended = {"v": False}
     reconnect_count = 0
     # Consecutive Gemini server errors (503 high-demand / UNAVAILABLE) with no
     # productive session in between. Reset whenever a session yields audio, so a
@@ -564,7 +573,7 @@ async def tata_stream(ws: WebSocket):
                                 return
 
                     async def gemini_to_tata():
-                        nonlocal out_state, out_buf
+                        nonlocal out_state, out_buf, client_closed
                         _FILLER_BYTES = (OUTPUT_SAMPLE_RATE // 25) * 2  # 40 ms @ 24 kHz PCM16
                         _FILLER_SILENCE = b"\x00" * _FILLER_BYTES
                         filler_box: dict = {"task": None}
@@ -572,6 +581,9 @@ async def tata_stream(ws: WebSocket):
                         # PBX transfer until the agent has spoken its hand-off line, so
                         # the caller/human aren't bridged into silence.
                         pending_transfer: dict = {"intercom": None}
+                        # Set when the agent invokes end_call: we hang up only after the
+                        # agent has spoken its closing line (deferred to turn_complete).
+                        pending_end: dict = {"v": False}
 
                         async def _send_mixed(pcm24k: bytes):
                             nonlocal out_state, out_buf
@@ -680,6 +692,16 @@ async def tata_stream(ws: WebSocket):
                                                                 "e.g. 'Sure, please hold while I connect you to a "
                                                                 "human agent.' Then stop talking."),
                                                 }
+                                            elif fc.name == "end_call":
+                                                # DEFER the hang-up: let the agent speak a short closing
+                                                # line; we tear the call down once its turn completes.
+                                                pending_end["v"] = True
+                                                result = {
+                                                    "status": "ok",
+                                                    "message": ("Say a brief closing line to the caller now, "
+                                                                "e.g. 'Thank you for calling, goodbye!' Then "
+                                                                "stop talking."),
+                                                }
                                             else:
                                                 result = await dispatch_tool_call(
                                                     call_tool_ids, fc.name, _args,
@@ -727,6 +749,17 @@ async def tata_stream(ws: WebSocket):
                                         or getattr(sc, "generation_complete", False)
                                     ):
                                         await _do_pending_transfer()
+                                        return
+                                    # Deferred end_call: the agent has finished its closing
+                                    # line → flush it, then end the call (finally hangs up the
+                                    # TATA leg + records AGENT_ENDED).
+                                    if pending_end["v"] and sc and (
+                                        getattr(sc, "turn_complete", False)
+                                        or getattr(sc, "generation_complete", False)
+                                    ):
+                                        await _flush_out_buf()
+                                        agent_ended["v"] = True
+                                        client_closed = True
                                         return
                                 await asyncio.sleep(0)
                         finally:
@@ -781,6 +814,7 @@ async def tata_stream(ws: WebSocket):
                     if server_error_streak > MAX_SERVER_ERROR_STREAK:
                         log.error("Gemini unavailable after %d consecutive 503s — ending call",
                                   server_error_streak)
+                        model_unavailable["v"] = True
                         break
                     backoff = min(0.5 * server_error_streak, 3.0)
                     reconnect_count += 1
@@ -831,6 +865,7 @@ async def tata_stream(ws: WebSocket):
     except Exception as exc:
         log.exception("TATA bridge error")
         fatal_error = str(exc)
+        fatal_exc = exc
     finally:
         # If WE ended the call (fatal error / Gemini unavailable / hold timeout)
         # while the caller is still connected, actively hang up the TATA leg so it
@@ -839,11 +874,28 @@ async def tata_stream(ws: WebSocket):
         if not ended_by_caller["v"] and not transfer_state["active"]:
             await _tata_hangup(tata_call_sid)
         if fatal_error:
-            await end_call(log_id, status="error", error_message=fatal_error)
+            # Categorize the crash (network drop vs Gemini 5xx vs internal) so the
+            # calls UI shows the exact reason and a WhatsApp callback fires.
+            await end_call(log_id, status="error",
+                           reason=classify_disconnect(fatal_exc),
+                           error_message=fatal_error)
         else:
-            await end_call(log_id, api_key=GOOGLE_API_KEY or None)
+            # Clean teardown: figure out WHY the call ended.
+            if agent_ended["v"]:
+                reason = REASON_AGENT_ENDED
+            elif model_unavailable["v"]:
+                reason = REASON_MODEL_ERROR          # Gemini stayed down → notify customer
+            elif ended_by_caller["v"]:
+                reason = REASON_CLIENT_DISCONNECTED
+            else:
+                reason = REASON_COMPLETED
+            # MODEL_ERROR is a failure even though no exception bubbled up — record
+            # it as status="error" so it shows red and triggers the WhatsApp notify.
+            status = "error" if reason == REASON_MODEL_ERROR else "ended"
+            await end_call(log_id, status=status, reason=reason,
+                           api_key=GOOGLE_API_KEY or None)
         log.info(
-            "📞 CALL ENDED (log_id=%s, call=%s) | by_caller=%s transferred=%s%s",
+            "📞 CALL ENDED (log_id=%s, call=%s) | by_caller=%s transferred=%s agent_ended=%s%s",
             log_id, tata_call_sid, ended_by_caller["v"], transfer_state["active"],
-            f" error={fatal_error}" if fatal_error else "",
+            agent_ended["v"], f" error={fatal_error}" if fatal_error else "",
         )

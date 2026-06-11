@@ -17,6 +17,11 @@ class GeminiCallLog(Base):
     system_prompt: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     transcript: Mapped[Any] = mapped_column(JSON, nullable=False, default=list)
     status: Mapped[str] = mapped_column(String(16), nullable=False, default="active")  # active | ended | error
+    # Categorized end reason shown in the calls UI. Free `status` stays coarse
+    # (active|ended|error); end_reason captures WHY a call finished:
+    #   COMPLETED | CLIENT_DISCONNECTED | AGENT_ENDED |
+    #   NETWORK_ISSUE | MODEL_ERROR | INTERNAL_ERROR
+    end_reason: Mapped[Optional[str]] = mapped_column(String(32), nullable=True)
     error_message: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     started_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
     ended_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
