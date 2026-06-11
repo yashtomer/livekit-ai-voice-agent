@@ -38,6 +38,12 @@ router = APIRouter()
 SERVER_GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 MODEL = os.environ.get("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview")
 API_VERSION = os.environ.get("GEMINI_API_VERSION", "v1alpha")
+# After this many fully off-topic requests (reported via report_off_topic), a
+# browser agent ends the call (no human transfer leg exists in the browser).
+try:
+    OFF_TOPIC_THRESHOLD = max(1, int(os.environ.get("OFF_TOPIC_TRANSFER_THRESHOLD", "3")))
+except ValueError:
+    OFF_TOPIC_THRESHOLD = 3
 INPUT_SAMPLE_RATE = 16000
 
 LANGUAGE_NAMES = {
@@ -226,6 +232,8 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
     # End-of-call bookkeeping. `agent_ended` flips when the AI invokes the
     # end_call tool so teardown records AGENT_ENDED rather than a client hangup.
     end_state = {"agent_ended": False}
+    # Server-side off-topic strike counter (survives Gemini reconnects).
+    off_topic = {"n": 0}
 
     try:
         from google import genai
@@ -332,6 +340,31 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
                                                 # closing line; we close the socket on turn_complete.
                                                 end_state["agent_ended"] = True
                                                 result = {"status": "ok", "message": "Ending the call now."}
+                                            elif fc.name == "report_off_topic":
+                                                # Server-side strike counter (survives Gemini reconnects).
+                                                off_topic["n"] += 1
+                                                n = off_topic["n"]
+                                                log.info("🚫 off-topic strike %d/%d (topic=%r)",
+                                                         n, OFF_TOPIC_THRESHOLD, args.get("topic"))
+                                                if n < OFF_TOPIC_THRESHOLD:
+                                                    result = {
+                                                        "status": "ok",
+                                                        "strikes": str(n),
+                                                        "message": ("Politely tell the user that's outside what you "
+                                                                    "can help with, briefly restate what you DO handle, "
+                                                                    "and ask if there's anything related you can assist with."),
+                                                    }
+                                                else:
+                                                    # No human-transfer leg on browser calls → end the call
+                                                    # after the agent speaks its closing line.
+                                                    end_state["agent_ended"] = True
+                                                    result = {
+                                                        "status": "escalate",
+                                                        "strikes": str(n),
+                                                        "message": ("Tell the user you're only able to help with your "
+                                                                    "specific area and will end the call now, then say "
+                                                                    "a brief goodbye. Then stop talking."),
+                                                    }
                                             else:
                                                 result = await _dispatch(
                                                     tool_ids, fc.name, args,
@@ -411,8 +444,9 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
                                         await _send(websocket, {"type": "status", "state": "listening"})
                                         # Agent ended the call: its closing line has now been
                                         # spoken (turn_complete) — stop the session and tear down.
+                                        # (Closing the socket flips the client back to 'idle'; we
+                                        # don't emit a non-standard 'ended' status the UI can't map.)
                                         if end_state["agent_ended"]:
-                                            await _send(websocket, {"type": "status", "state": "ended"})
                                             return
 
                                 await asyncio.sleep(0)

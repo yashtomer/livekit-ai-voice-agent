@@ -4407,7 +4407,9 @@ export default function GeminiPage() {
     await startCall()
   }
 
-  const sm = STATUS_META[status]
+  // Fall back to 'idle' for any unexpected status so a stray value can never
+  // crash the whole page on `sm.color`.
+  const sm = STATUS_META[status] ?? STATUS_META.idle
   const isActive = inCall || status === 'connecting'
 
   return (

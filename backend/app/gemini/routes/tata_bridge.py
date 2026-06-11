@@ -107,6 +107,13 @@ TATA_HANGUP_URL = os.environ.get("TATA_HANGUP_URL", "").strip()
 MODEL       = os.environ.get("GEMINI_LIVE_MODEL", "gemini-2.0-flash-live-001")
 API_VERSION = os.environ.get("GEMINI_API_VERSION", "v1beta")
 
+# After this many fully off-topic requests (reported via the report_off_topic
+# tool), the agent escalates the call to a human (phone) / ends it (browser).
+try:
+    OFF_TOPIC_THRESHOLD = max(1, int(os.environ.get("OFF_TOPIC_TRANSFER_THRESHOLD", "3")))
+except ValueError:
+    OFF_TOPIC_THRESHOLD = 3
+
 PHONE_SYSTEM_PROMPT = os.environ.get("PHONE_SYSTEM_PROMPT") or DEFAULT_PHONE_AGENT
 
 LANGUAGE_NAMES = {
@@ -417,6 +424,10 @@ async def tata_stream(ws: WebSocket):
     # availability lookup returns {"transfer_number": "1003"}). transfer_call then
     # routes to that extension instead of the static TATA_TRANSFER_CODE.
     last_transfer = {"number": None}
+    # Counts fully off-topic requests (reported via report_off_topic). Lives in
+    # this call's scope so the strike count SURVIVES Gemini reconnects — the model
+    # loses context on every reconnect, so it can't be trusted to count itself.
+    off_topic = {"n": 0}
 
     call_cfg: dict | None = None
 
@@ -702,6 +713,35 @@ async def tata_stream(ws: WebSocket):
                                                                 "e.g. 'Thank you for calling, goodbye!' Then "
                                                                 "stop talking."),
                                                 }
+                                            elif fc.name == "report_off_topic":
+                                                # Server-side strike counter (survives Gemini reconnects).
+                                                off_topic["n"] += 1
+                                                n = off_topic["n"]
+                                                log.info("🚫 off-topic strike %d/%d (topic=%r)",
+                                                         n, OFF_TOPIC_THRESHOLD, _args.get("topic"))
+                                                if n < OFF_TOPIC_THRESHOLD:
+                                                    result = {
+                                                        "status": "ok",
+                                                        "strikes": str(n),
+                                                        "message": ("Politely tell the caller that's outside what you "
+                                                                    "can help with, briefly restate what you DO handle, "
+                                                                    "and ask if there's anything related you can assist with."),
+                                                    }
+                                                else:
+                                                    # Threshold reached → warm-transfer to a human, reusing
+                                                    # the deferred-transfer flow (fires after the agent speaks).
+                                                    intercom = str(
+                                                        last_transfer["number"]
+                                                        or call_transfer_code
+                                                        or ""
+                                                    )
+                                                    pending_transfer["intercom"] = intercom
+                                                    result = {
+                                                        "status": "escalate",
+                                                        "strikes": str(n),
+                                                        "message": ("Tell the caller: 'I'll transfer your call to our "
+                                                                    "senior representative now.' Then stop talking."),
+                                                    }
                                             else:
                                                 result = await dispatch_tool_call(
                                                     call_tool_ids, fc.name, _args,

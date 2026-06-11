@@ -639,7 +639,44 @@ async def seed_builtin_tools() -> None:
                 await db.refresh(end_call_tool)
                 log.info("Seeded builtin tool: end_call (id=%d)", end_call_tool.id)
 
-            # Link transfer_call + end_call to the phone-facing demo agents.
+            # ── report_off_topic builtin (3-strikes → escalate to a human) ──
+            off_topic = (await db.execute(
+                select(GeminiTool).where(GeminiTool.slug == "report_off_topic")
+            )).scalar_one_or_none()
+            if not off_topic:
+                off_topic = GeminiTool(
+                    slug="report_off_topic",
+                    name="Report Off-Topic Request",
+                    description=(
+                        "Report that the caller just made a request COMPLETELY outside your "
+                        "purpose — e.g. asking an appointment-booking agent to book a movie "
+                        "ticket. Call this EVERY time the caller makes such an unrelated "
+                        "request, passing what they asked for as `topic`. Do NOT call it for "
+                        "related or partially-related questions, small talk, or greetings. "
+                        "The system counts repeated off-topic requests; read out the `message` "
+                        "it returns verbatim. After enough strikes it will instruct you to hand "
+                        "the caller to a senior human representative (or end the call)."
+                    ),
+                    http_method="GET",
+                    url=None,
+                    headers={},
+                    parameters=[
+                        {"name": "topic", "type": "string", "required": False,
+                         "description": "What the caller asked for that is outside your scope (e.g. 'book a movie ticket')."},
+                    ],
+                    response_schema=[
+                        {"key": "status",  "type": "string", "description": "'ok' (redirect the caller) or 'escalate' (transfer/end as instructed)."},
+                        {"key": "message", "type": "string", "description": "Exactly what to say to the caller next."},
+                        {"key": "strikes", "type": "string", "description": "How many off-topic requests have been counted so far."},
+                    ],
+                    is_builtin=True,
+                )
+                db.add(off_topic)
+                await db.commit()
+                await db.refresh(off_topic)
+                log.info("Seeded builtin tool: report_off_topic (id=%d)", off_topic.id)
+
+            # Link transfer_call + end_call + report_off_topic to the phone-facing demo agents.
             for slug in ("healthcare_booking", "customer_support", "sales_agent"):
                 ag = (await db.execute(
                     select(GeminiAgent).where(GeminiAgent.slug == slug)
@@ -648,13 +685,13 @@ async def seed_builtin_tools() -> None:
                     continue
                 current = list(ag.tool_ids or [])
                 changed = False
-                for tool_id in (transfer.id, end_call_tool.id):
+                for tool_id in (transfer.id, end_call_tool.id, off_topic.id):
                     if tool_id not in current:
                         current.append(tool_id)
                         changed = True
                 if changed:
                     ag.tool_ids = current
                     await db.commit()
-                    log.info("Linked transfer_call/end_call to %s agent", slug)
+                    log.info("Linked transfer_call/end_call/report_off_topic to %s agent", slug)
     except Exception:
         log.exception("seed_builtin_tools failed")
