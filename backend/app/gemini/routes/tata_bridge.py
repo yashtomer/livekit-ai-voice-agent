@@ -56,7 +56,11 @@ from ..services.logger import (
     REASON_MODEL_ERROR, REASON_COMPLETED,
 )
 from ..services.agents_store import get_default_phone_agent
-from ..services.tools_runtime import build_call_context, build_gemini_tools, dispatch_tool_call, render_template
+from ..services.tools_runtime import build_call_context, build_gemini_tools, dispatch_tool_call, render_template, load_tools_by_ids
+
+# Tool slug whose result gates a transfer. When an agent has this tool, the bridge
+# REQUIRES a fresh availability check before allowing transfer_call.
+AVAILABILITY_TOOL_SLUG = "check_agent_availability"
 from ..agents import DEFAULT_PHONE_AGENT
 from ..ambience import AmbientMixer
 
@@ -428,6 +432,10 @@ async def tata_stream(ws: WebSocket):
     # this call's scope so the strike count SURVIVES Gemini reconnects — the model
     # loses context on every reconnect, so it can't be trusted to count itself.
     off_topic = {"n": 0}
+    # Result of the most recent check_agent_availability call. We REQUIRE a fresh
+    # availability check before any transfer: `checked` flips once the tool runs,
+    # `available` reflects whether it returned a usable transfer_number.
+    availability = {"checked": False, "available": False}
 
     call_cfg: dict | None = None
 
@@ -476,6 +484,12 @@ async def tata_stream(ws: WebSocket):
                     phone_number = caller_number
 
                 call_tools   = await build_gemini_tools(call_tool_ids, call_kb_ids)
+                # Does this agent have the availability tool? Only then do we enforce
+                # "check availability before transfer" — agents without it transfer as before.
+                _resolved_tools = await load_tools_by_ids(call_tool_ids)
+                has_availability_tool = any(
+                    getattr(t, "slug", None) == AVAILABILITY_TOOL_SLUG for t in _resolved_tools
+                )
                 always_mixer = AmbientMixer(_ambient_always_slug,    OUTPUT_SAMPLE_RATE, _ambient_vol)
                 tool_mixer   = AmbientMixer(_ambient_tool_call_slug, OUTPUT_SAMPLE_RATE, _ambient_vol)
 
@@ -595,6 +609,9 @@ async def tata_stream(ws: WebSocket):
                         # Set when the agent invokes end_call: we hang up only after the
                         # agent has spoken its closing line (deferred to turn_complete).
                         pending_end: dict = {"v": False}
+                        # Set when a transfer was requested but NO human agent is available:
+                        # the agent promises a callback, we WhatsApp the caller, then end.
+                        pending_callback: dict = {"v": False}
 
                         async def _send_mixed(pcm24k: bytes):
                             nonlocal out_state, out_buf
@@ -658,12 +675,32 @@ async def tata_stream(ws: WebSocket):
                         async def _do_pending_transfer():
                             """Fire the deferred PBX transfer now that the agent has
                             finished speaking its hand-off line."""
+                            nonlocal client_closed
                             await _flush_out_buf()
-                            result = await _tata_transfer(tata_call_sid, pending_transfer["intercom"])
+                            intercom = pending_transfer["intercom"]
+                            if not intercom:
+                                # No transfer target configured (TATA_TRANSFER_CODE empty and no
+                                # transfer_number from a tool). We CANNOT transfer — end the call
+                                # instead of looping back into a fresh Gemini session (which would
+                                # restart the conversation and make the agent "hallucinate").
+                                log.warning("Transfer requested but no target configured "
+                                            "(set TATA_TRANSFER_CODE) — ending call")
+                                agent_ended["v"] = True
+                                client_closed = True
+                                await _stop_filler()
+                                return
+                            result = await _tata_transfer(tata_call_sid, intercom)
                             log.info("Transfer (after hand-off line) → %s", result)
                             if result.get("status") == "ok":
                                 transfer_state["active"] = True
                                 log.info("Transfer accepted by TATA — releasing call to human agent")
+                            else:
+                                # TATA rejected the transfer (bad code, busy, API error). Don't loop
+                                # back into a fresh session — end the call so we stop the leg.
+                                log.warning("TATA transfer failed (intercom=%s) — ending call: %s",
+                                            intercom, result)
+                                agent_ended["v"] = True
+                                client_closed = True
                             await _stop_filler()
 
                         try:
@@ -679,30 +716,42 @@ async def tata_stream(ws: WebSocket):
                                             _args = dict(fc.args or {})
                                             tool_meta: dict = {}
                                             if fc.name == "transfer_call":
-                                                # Warm hand-off to a TATA agent/department via the
-                                                # Call Options API. Target priority:
-                                                #   1. explicit intercom/transfer_number in the call
-                                                #   2. transfer_number returned by an earlier tool
-                                                #      (e.g. agent-availability lookup → "1003")
-                                                #   3. static TATA_TRANSFER_CODE fallback
-                                                intercom = str(
-                                                    _args.get("intercom")
-                                                    or _args.get("transfer_number")
-                                                    or last_transfer["number"]
-                                                    or call_transfer_code
-                                                    or ""
-                                                )
-                                                # DEFER the PBX transfer: stash the target and tell the
-                                                # agent to speak its hand-off line. The transfer fires
-                                                # once the agent's turn completes (see turn_complete
-                                                # below) so the caller isn't bridged into silence.
-                                                pending_transfer["intercom"] = intercom
-                                                result = {
-                                                    "status": "ok",
-                                                    "message": ("Say a brief hand-off line to the caller now, "
-                                                                "e.g. 'Sure, please hold while I connect you to a "
-                                                                "human agent.' Then stop talking."),
-                                                }
+                                                explicit = str(_args.get("intercom") or _args.get("transfer_number") or "")
+                                                if has_availability_tool and not explicit and not availability["checked"]:
+                                                    # ENFORCE: this agent must confirm a free agent first.
+                                                    result = {
+                                                        "status": "needs_check",
+                                                        "message": ("Before transferring, you MUST call "
+                                                                    "check_agent_availability first to confirm a human "
+                                                                    "agent is free. Call it now, then transfer only if "
+                                                                    "it returns an available agent."),
+                                                    }
+                                                elif has_availability_tool and availability["checked"] \
+                                                        and not availability["available"] and not explicit:
+                                                    # Checked, but no agent available → promise a callback.
+                                                    pending_callback["v"] = True
+                                                    result = {
+                                                        "status": "unavailable",
+                                                        "message": ("No human agent is available right now. Tell the "
+                                                                    "caller our team will call them back shortly, then "
+                                                                    "stop talking."),
+                                                    }
+                                                else:
+                                                    # Warm hand-off. Target priority: explicit arg →
+                                                    # transfer_number from the availability check → static code.
+                                                    intercom = str(
+                                                        explicit
+                                                        or last_transfer["number"]
+                                                        or call_transfer_code
+                                                        or ""
+                                                    )
+                                                    pending_transfer["intercom"] = intercom
+                                                    result = {
+                                                        "status": "ok",
+                                                        "message": ("Say a brief hand-off line to the caller now, "
+                                                                    "e.g. 'Sure, please hold while I connect you to a "
+                                                                    "specialist.' Then stop talking."),
+                                                    }
                                             elif fc.name == "end_call":
                                                 # DEFER the hang-up: let the agent speak a short closing
                                                 # line; we tear the call down once its turn completes.
@@ -727,15 +776,21 @@ async def tata_stream(ws: WebSocket):
                                                                     "can help with, briefly restate what you DO handle, "
                                                                     "and ask if there's anything related you can assist with."),
                                                     }
+                                                elif has_availability_tool:
+                                                    # Threshold reached → escalate via the availability gate.
+                                                    result = {
+                                                        "status": "escalate",
+                                                        "strikes": str(n),
+                                                        "message": ("Tell the caller you'll connect them to our senior "
+                                                                    "representative. Then call check_agent_availability, "
+                                                                    "and call transfer_call only if an agent is available."),
+                                                    }
                                                 else:
-                                                    # Threshold reached → warm-transfer to a human, reusing
-                                                    # the deferred-transfer flow (fires after the agent speaks).
-                                                    intercom = str(
-                                                        last_transfer["number"]
-                                                        or call_transfer_code
-                                                        or ""
+                                                    # No availability tool on this agent → transfer directly
+                                                    # via the deferred-transfer flow (fires after the agent speaks).
+                                                    pending_transfer["intercom"] = str(
+                                                        last_transfer["number"] or call_transfer_code or ""
                                                     )
-                                                    pending_transfer["intercom"] = intercom
                                                     result = {
                                                         "status": "escalate",
                                                         "strikes": str(n),
@@ -759,6 +814,21 @@ async def tata_stream(ws: WebSocket):
                                                     last_transfer["number"] = str(result["transfer_number"])
                                                     log.info("📌 captured transfer_number=%s from %s",
                                                              last_transfer["number"], fc.name)
+                                                # Track availability so transfer_call can enforce a fresh
+                                                # check. An agent is "available" when the check returned a
+                                                # transfer_number (or an explicit available=true flag).
+                                                if fc.name == "check_agent_availability":
+                                                    availability["checked"] = True
+                                                    avail = False
+                                                    if isinstance(result, dict):
+                                                        avail = bool(
+                                                            result.get("transfer_number")
+                                                            or result.get("available") is True
+                                                            or str(result.get("available")).lower() == "true"
+                                                        )
+                                                    availability["available"] = avail
+                                                    log.info("🧑‍💼 availability check → available=%s number=%s",
+                                                             avail, last_transfer["number"])
                                             log.info("🔧 tool %s(%s) → %s", fc.name, _args, result)
                                             await add_tool_event(log_id, fc.name, _args, result, request=tool_meta or None)
                                             tool_responses.append(
@@ -798,6 +868,23 @@ async def tata_stream(ws: WebSocket):
                                         or getattr(sc, "generation_complete", False)
                                     ):
                                         await _flush_out_buf()
+                                        agent_ended["v"] = True
+                                        client_closed = True
+                                        return
+                                    # Deferred callback: no agent was available → the agent has
+                                    # now promised a callback. WhatsApp the caller, then end.
+                                    if pending_callback["v"] and sc and (
+                                        getattr(sc, "turn_complete", False)
+                                        or getattr(sc, "generation_complete", False)
+                                    ):
+                                        await _flush_out_buf()
+                                        _cb_number = phone_number or caller_number
+                                        if _cb_number:
+                                            try:
+                                                from ..services.whatsapp import send_whatsapp_template
+                                                await send_whatsapp_template(_cb_number)
+                                            except Exception as exc:
+                                                log.warning("callback WhatsApp send failed: %s", exc)
                                         agent_ended["v"] = True
                                         client_closed = True
                                         return
