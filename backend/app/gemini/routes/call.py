@@ -22,7 +22,10 @@ from ...models.user import User, UserRole
 from ...models.api_key import UserAPIKey
 from ...services.auth import decode_token
 from ...services.encryption import decrypt_key
-from ..services.logger import start_call, add_transcript, add_tool_event, end_call
+from ..services.logger import (
+    start_call, add_transcript, add_tool_event, end_call,
+    classify_disconnect, REASON_AGENT_ENDED, REASON_CLIENT_DISCONNECTED,
+)
 from ..services.sentiment import score_text
 from ..ambience import AmbientMixer
 
@@ -35,6 +38,12 @@ router = APIRouter()
 SERVER_GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY", "")
 MODEL = os.environ.get("GEMINI_LIVE_MODEL", "gemini-3.1-flash-live-preview")
 API_VERSION = os.environ.get("GEMINI_API_VERSION", "v1alpha")
+# After this many fully off-topic requests (reported via report_off_topic), a
+# browser agent ends the call (no human transfer leg exists in the browser).
+try:
+    OFF_TOPIC_THRESHOLD = max(1, int(os.environ.get("OFF_TOPIC_TRANSFER_THRESHOLD", "3")))
+except ValueError:
+    OFF_TOPIC_THRESHOLD = 3
 INPUT_SAMPLE_RATE = 16000
 
 LANGUAGE_NAMES = {
@@ -220,6 +229,12 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
         system_prompt=system_prompt,
     )
 
+    # End-of-call bookkeeping. `agent_ended` flips when the AI invokes the
+    # end_call tool so teardown records AGENT_ENDED rather than a client hangup.
+    end_state = {"agent_ended": False}
+    # Server-side off-topic strike counter (survives Gemini reconnects).
+    off_topic = {"n": 0}
+
     try:
         from google import genai
         from google.genai import types
@@ -320,12 +335,43 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
                                         for fc in tc.function_calls:
                                             args = dict(fc.args or {})
                                             tool_meta: dict = {}
-                                            result = await _dispatch(
-                                                tool_ids, fc.name, args,
-                                                kb_collection_ids=kb_collection_ids,
-                                                context=build_call_context(conversation_id=call_id),
-                                                meta_out=tool_meta,
-                                            )
+                                            if fc.name == "end_call":
+                                                # Agent hangs up. Mark it, let the agent speak its
+                                                # closing line; we close the socket on turn_complete.
+                                                end_state["agent_ended"] = True
+                                                result = {"status": "ok", "message": "Ending the call now."}
+                                            elif fc.name == "report_off_topic":
+                                                # Server-side strike counter (survives Gemini reconnects).
+                                                off_topic["n"] += 1
+                                                n = off_topic["n"]
+                                                log.info("🚫 off-topic strike %d/%d (topic=%r)",
+                                                         n, OFF_TOPIC_THRESHOLD, args.get("topic"))
+                                                if n < OFF_TOPIC_THRESHOLD:
+                                                    result = {
+                                                        "status": "ok",
+                                                        "strikes": str(n),
+                                                        "message": ("Politely tell the user that's outside what you "
+                                                                    "can help with, briefly restate what you DO handle, "
+                                                                    "and ask if there's anything related you can assist with."),
+                                                    }
+                                                else:
+                                                    # No human-transfer leg on browser calls → end the call
+                                                    # after the agent speaks its closing line.
+                                                    end_state["agent_ended"] = True
+                                                    result = {
+                                                        "status": "escalate",
+                                                        "strikes": str(n),
+                                                        "message": ("Tell the user you're only able to help with your "
+                                                                    "specific area and will end the call now, then say "
+                                                                    "a brief goodbye. Then stop talking."),
+                                                    }
+                                            else:
+                                                result = await _dispatch(
+                                                    tool_ids, fc.name, args,
+                                                    kb_collection_ids=kb_collection_ids,
+                                                    context=build_call_context(conversation_id=call_id),
+                                                    meta_out=tool_meta,
+                                                )
                                             log.info("🔧 tool %s(%s) → %s", fc.name, args, result)
                                             # Surface the tool call in the live UI timeline and persist it.
                                             await _send(websocket, {
@@ -396,6 +442,12 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
                                                 await _send(websocket, {"type": "transcript", "role": "model", "text": text})
                                                 await add_transcript(call_id, "model", text)
                                         await _send(websocket, {"type": "status", "state": "listening"})
+                                        # Agent ended the call: its closing line has now been
+                                        # spoken (turn_complete) — stop the session and tear down.
+                                        # (Closing the socket flips the client back to 'idle'; we
+                                        # don't emit a non-standard 'ended' status the UI can't map.)
+                                        if end_state["agent_ended"]:
+                                            return
 
                                 await asyncio.sleep(0)
                         finally:
@@ -420,6 +472,10 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
                         exc = task.exception()
                         if exc and not isinstance(exc, WebSocketDisconnect):
                             raise exc
+
+                # Agent invoked end_call — stop reconnecting and tear down.
+                if end_state["agent_ended"]:
+                    break
 
                 # Either side completed cleanly. If browser is still open,
                 # treat it as an unexpected end and reconnect.
@@ -454,7 +510,10 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
     except Exception as exc:
         log.exception("Gemini WS error: %s", exc)
         await _send(websocket, {"type": "error", "message": str(exc)})
-        await end_call(call_id, status="error", error_message=str(exc))
+        await end_call(call_id, status="error", reason=classify_disconnect(exc), error_message=str(exc))
         return
     finally:
-        await end_call(call_id, api_key=api_key)
+        # On a clean finish: AGENT_ENDED if the AI hung up, otherwise the browser
+        # client closed the socket (a browser call ends when the user leaves).
+        reason = REASON_AGENT_ENDED if end_state["agent_ended"] else REASON_CLIENT_DISCONNECTED
+        await end_call(call_id, reason=reason, api_key=api_key)

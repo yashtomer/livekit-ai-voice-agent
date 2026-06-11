@@ -28,6 +28,7 @@ def _row_summary(row: GeminiCallLog) -> dict:
         "language": row.language,
         "voice": row.voice,
         "status": row.status,
+        "end_reason": row.end_reason,
         "started_at": row.started_at.isoformat() + "Z" if row.started_at else None,
         "ended_at": row.ended_at.isoformat() + "Z" if row.ended_at else None,
         "duration_s": row.duration_s,

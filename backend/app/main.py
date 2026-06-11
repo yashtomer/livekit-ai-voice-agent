@@ -108,6 +108,11 @@ async def _migrate_schema() -> None:
         await conn.execute(text(
             "ALTER TABLE gemini_call_logs ADD COLUMN IF NOT EXISTS extracted JSONB"
         ))
+        # gemini_call_logs.end_reason — categorized disconnect reason for the calls UI
+        # (COMPLETED | CLIENT_DISCONNECTED | AGENT_ENDED | NETWORK_ISSUE | MODEL_ERROR | INTERNAL_ERROR).
+        await conn.execute(text(
+            "ALTER TABLE gemini_call_logs ADD COLUMN IF NOT EXISTS end_reason VARCHAR(32)"
+        ))
 
 
 async def reconcile_seed_models(db) -> dict:
