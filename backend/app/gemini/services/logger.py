@@ -192,24 +192,41 @@ async def end_call(
         log.exception("gemini_logger.end_call failed")
         return
 
-    # Non-browser call dropped on an error → notify the customer we'll call back.
-    # Best-effort: a failed WhatsApp send must never affect call teardown.
-    if call_type and call_type != "browser" and reason in _WHATSAPP_REASONS and phone_number:
-        try:
-            from .whatsapp import send_whatsapp_template
-            await send_whatsapp_template(phone_number)
-        except Exception as exc:
-            log.warning("WhatsApp disconnect notify skipped for call %d: %s", call_id, str(exc)[:160])
-
-    # Best-effort post-call analysis. Never let a failure here affect the call.
+    # Post-call AI analysis. Runs once on a clean end; besides the summary it
+    # yields a `resolved` verdict we reuse to gate the caller-disconnect SMS.
+    # Best-effort: never let a failure here affect the call.
+    analysis: Optional[dict] = None
     if status == "ended" and api_key and transcript:
         try:
-            await _generate_summary(call_id, transcript, api_key)
+            analysis = await _generate_summary(call_id, transcript, api_key)
         except Exception as exc:
             # Non-fatal: the call/transcript are already saved, only the AI summary
             # is missing. The summary model (gemini-2.5-flash) periodically returns
             # 503 "high demand" — log one concise line, not a scary stack trace.
             log.warning("post-call summary skipped for call %d: %s", call_id, str(exc)[:160])
+
+    # Decide whether to WhatsApp the caller a "we'll call you back" notice.
+    #   • our-side break (network / model / internal) → always notify.
+    #   • caller hung up (CLIENT_DISCONNECTED)        → notify ONLY if the
+    #       conversation wasn't resolved. The verdict comes from the post-call
+    #       judge above; if it couldn't decide (judge failed, no transcript,
+    #       short call) `resolved` is None → fail SAFE and notify.
+    #   • agent ended the call / clean COMPLETED      → never notify.
+    # Best-effort: a failed WhatsApp send must never affect call teardown.
+    send_sms = False
+    if call_type and call_type != "browser" and phone_number:
+        if reason in _WHATSAPP_REASONS:
+            send_sms = True
+        elif reason == REASON_CLIENT_DISCONNECTED:
+            resolved = analysis.get("resolved") if isinstance(analysis, dict) else None
+            send_sms = resolved is not True
+
+    if send_sms:
+        try:
+            from .whatsapp import send_whatsapp_template
+            await send_whatsapp_template(phone_number)
+        except Exception as exc:
+            log.warning("WhatsApp disconnect notify skipped for call %d: %s", call_id, str(exc)[:160])
 
 
 # ── Post-call AI analysis ─────────────────────────────────────────────────────
@@ -223,6 +240,11 @@ _SUMMARY_INSTRUCTION = (
     '  "extracted" : an object of the key facts captured during the call '
     "(e.g. names, dates, times, order IDs, intent, resolution). Use null/empty "
     "object if nothing concrete was captured.\n"
+    '  "resolved"  : true or false. true ONLY if the caller\'s request/need was '
+    "fully handled before the call ended (their question was answered or their "
+    "task was completed). false if the caller hung up or the call was cut off "
+    "before their issue was resolved, or the conversation ended mid-task with an "
+    "open request. When unsure, prefer false.\n"
 )
 
 
@@ -239,10 +261,13 @@ def _transcript_to_text(transcript: list[dict]) -> str:
     return "\n".join(lines)[:12000]
 
 
-async def _generate_summary(call_id: int, transcript: list[dict], api_key: str) -> None:
+async def _generate_summary(call_id: int, transcript: list[dict], api_key: str) -> Optional[dict]:
+    """Run the post-call analysis. Persists summary/sentiment/extracted and returns
+    the parsed verdict dict (incl. a `resolved` bool) so callers can gate follow-ups.
+    Returns None when there is nothing to analyse."""
     convo = _transcript_to_text(transcript)
     if not convo.strip():
-        return
+        return None
 
     import asyncio
 
@@ -293,16 +318,24 @@ async def _generate_summary(call_id: int, transcript: list[dict], api_key: str) 
     extracted = data.get("extracted")
     if not isinstance(extracted, (dict, list)):
         extracted = None
+    # Resolution verdict gates the caller-disconnect WhatsApp. Keep it strictly
+    # boolean; anything else (missing/garbled) stays None so the caller path can
+    # fail safe (treat as unresolved → notify).
+    resolved = data.get("resolved")
+    if not isinstance(resolved, bool):
+        resolved = None
 
     try:
         async with SessionLocal() as db:
             row = (await db.execute(select(GeminiCallLog).where(GeminiCallLog.id == call_id))).scalar_one_or_none()
             if not row:
-                return
+                return None
             row.summary = summary
             row.sentiment = sentiment
             row.extracted = extracted
             await db.commit()
-            log.info("📝 call %d analysed: sentiment=%s", call_id, sentiment)
+            log.info("📝 call %d analysed: sentiment=%s resolved=%s", call_id, sentiment, resolved)
     except Exception:
         log.exception("gemini_logger._generate_summary persist failed")
+
+    return {"summary": summary, "sentiment": sentiment, "extracted": extracted, "resolved": resolved}
