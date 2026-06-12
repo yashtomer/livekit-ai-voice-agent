@@ -33,6 +33,30 @@ def _digits(number: str) -> str:
     return "".join(ch for ch in (number or "") if ch.isdigit())
 
 
+def _to_e164(number: str | None) -> str:
+    """Best-effort E.164 (digits only, no '+') for the WhatsApp Cloud API.
+
+    Telephony providers (e.g. Tata) often report numbers in national format —
+    `09522272781` (trunk 0) or a bare 10-digit `9522272781`. Meta needs the full
+    country-coded form `919522272781`, so we strip a leading international-access
+    `00`/trunk `0` and prepend WHATSAPP_DEFAULT_COUNTRY_CODE to local numbers.
+
+    Numbers that already carry a country code (anything longer than the local
+    length) are passed through untouched, so non-Indian numbers still work.
+    """
+    d = _digits(number)
+    if not d:
+        return ""
+    cc = (os.environ.get("WHATSAPP_DEFAULT_COUNTRY_CODE", "91").strip() or "91")
+    if d.startswith("00"):          # 00<cc><number> international-access prefix
+        d = d[2:]
+    elif d.startswith("0"):         # national trunk prefix, e.g. 0XXXXXXXXXX
+        d = d.lstrip("0")
+    if len(d) == 10:                # bare national subscriber number → add cc
+        d = cc + d
+    return d
+
+
 async def send_whatsapp_template(
     to: str | None,
     *,
@@ -48,7 +72,7 @@ async def send_whatsapp_template(
     template = (template or os.environ.get("WHATSAPP_DISCONNECT_TEMPLATE", "hello_world")).strip()
     lang = (lang or os.environ.get("WHATSAPP_TEMPLATE_LANG", "en_US")).strip()
 
-    to_digits = _digits(to or "")
+    to_digits = _to_e164(to)
     if not (phone_number_id and token and to_digits):
         log.info(
             "WhatsApp notify skipped (phone_id=%s token=%s to=%s)",
