@@ -31,6 +31,12 @@ REASON_INTERNAL_ERROR     = "INTERNAL_ERROR"       # anything else
 # Reasons that warrant a "we'll call you back" WhatsApp to the customer.
 _WHATSAPP_REASONS = {REASON_NETWORK_ISSUE, REASON_MODEL_ERROR, REASON_INTERNAL_ERROR}
 
+# LOCAL TESTING ONLY: when set, browser calls (which carry no phone number)
+# become eligible for the disconnect WhatsApp and the notice is sent to THIS
+# number — start a browser call, cut it mid-conversation, and confirm the SMS
+# lands. Leave unset in production; browser calls are then never notified.
+WHATSAPP_TEST_NUMBER = os.environ.get("WHATSAPP_TEST_NUMBER", "").strip()
+
 
 def classify_disconnect(exc: BaseException | None) -> str:
     """Map a teardown exception to a categorized end reason.
@@ -213,18 +219,31 @@ async def end_call(
     #       short call) `resolved` is None → fail SAFE and notify.
     #   • agent ended the call / clean COMPLETED      → never notify.
     # Best-effort: a failed WhatsApp send must never affect call teardown.
+    #
+    # Recipient: real phone calls use their own number. Browser calls have none,
+    # so they're notified ONLY when WHATSAPP_TEST_NUMBER is set (local testing) —
+    # the notice then goes to that test number.
+    sms_to = phone_number or (WHATSAPP_TEST_NUMBER if call_type == "browser" else "")
     send_sms = False
-    if call_type and call_type != "browser" and phone_number:
+    if call_type and sms_to:
         if reason in _WHATSAPP_REASONS:
             send_sms = True
         elif reason == REASON_CLIENT_DISCONNECTED:
             resolved = analysis.get("resolved") if isinstance(analysis, dict) else None
             send_sms = resolved is not True
 
+    # One line that explains the SMS decision — invaluable when a call "should"
+    # have notified but didn't (usually because it ended AGENT_ENDED/COMPLETED,
+    # not CLIENT_DISCONNECTED, or the judge ruled the call resolved).
+    log.info("📨 call %d sms decision: type=%s reason=%s resolved=%s → send=%s",
+             call_id, call_type, reason,
+             (analysis or {}).get("resolved") if isinstance(analysis, dict) else None,
+             send_sms)
+
     if send_sms:
         try:
             from .whatsapp import send_whatsapp_template
-            await send_whatsapp_template(phone_number)
+            await send_whatsapp_template(sms_to)
         except Exception as exc:
             log.warning("WhatsApp disconnect notify skipped for call %d: %s", call_id, str(exc)[:160])
 
