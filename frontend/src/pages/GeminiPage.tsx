@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef, useCallback, type ComponentType, type ReactNode } from 'react'
+import { useState, useEffect, useLayoutEffect, useRef, useCallback, type ComponentType, type ReactNode } from 'react'
+import { createPortal } from 'react-dom'
 import { useQuery } from '@tanstack/react-query'
 import api from '../api/client'
 import { Device, Call } from '@twilio/voice-sdk'
@@ -275,15 +276,38 @@ const VOICES = [
   { name: 'Enceladus', gender: 'M', style: 'Composed & Thoughtful' },
 ]
 
+// Languages offered in the dropdown. Full Indian-language set (Gemini's
+// documented Indian languages) plus the major global languages. Codes are
+// ISO-639-1 (generic BCP-47), matching the existing scheme so previously-saved
+// agents keep resolving. Must stay in sync with LANGUAGE_NAMES in
+// backend/app/gemini/routes/{call,*_bridge}.py.
 const LANGUAGES = [
   { code: 'en', label: 'English' }, { code: 'hi', label: 'Hindi' },
-  { code: 'bn', label: 'Bengali' }, { code: 'ta', label: 'Tamil' },
-  { code: 'te', label: 'Telugu' }, { code: 'mr', label: 'Marathi' },
-  { code: 'gu', label: 'Gujarati' }, { code: 'es', label: 'Spanish' },
+  // Indian languages
+  { code: 'as', label: 'Assamese' }, { code: 'bn', label: 'Bengali' },
+  { code: 'gu', label: 'Gujarati' }, { code: 'kn', label: 'Kannada' },
+  { code: 'ml', label: 'Malayalam' }, { code: 'mr', label: 'Marathi' },
+  { code: 'or', label: 'Odia' }, { code: 'pa', label: 'Punjabi' },
+  { code: 'ta', label: 'Tamil' }, { code: 'te', label: 'Telugu' },
+  { code: 'ur', label: 'Urdu' },
+  // Major global languages
+  { code: 'ar', label: 'Arabic' }, { code: 'zh', label: 'Chinese (Mandarin)' },
   { code: 'fr', label: 'French' }, { code: 'de', label: 'German' },
-  { code: 'ja', label: 'Japanese' }, { code: 'ko', label: 'Korean' },
-  { code: 'zh', label: 'Chinese' },
+  { code: 'it', label: 'Italian' }, { code: 'ja', label: 'Japanese' },
+  { code: 'ko', label: 'Korean' }, { code: 'pt', label: 'Portuguese' },
+  { code: 'ru', label: 'Russian' }, { code: 'es', label: 'Spanish' },
 ]
+
+// Pre-built option lists for the searchable dropdowns (SearchableSelect).
+// Gemini's prebuilt voices are multilingual — they speak whichever language is
+// selected — so the sublabel describes gender + character, not a language.
+const LANGUAGE_OPTIONS: SelectOption[] = LANGUAGES.map(l => ({ value: l.code, label: l.label }))
+const VOICE_OPTIONS: SelectOption[] = VOICES.map(v => ({
+  value: v.name,
+  label: v.name,
+  sublabel: `${v.gender === 'F' ? 'Female' : v.gender === 'M' ? 'Male' : 'Neutral'} · ${v.style}`,
+  keywords: v.gender === 'F' ? 'female woman' : v.gender === 'M' ? 'male man' : 'neutral',
+}))
 
 const TEMPLATES = [
   {
@@ -336,6 +360,197 @@ const STATUS_META: Record<GeminiStatus, { label: string; color: string; dot: str
   processing: { label: 'Processing',  color: 'text-blue-500',                     dot: 'bg-blue-500 animate-pulse' },
   speaking:   { label: 'Speaking',    color: 'text-purple-400',                   dot: 'bg-purple-400 animate-pulse' },
   error:      { label: 'Error',       color: 'text-destructive',                  dot: 'bg-destructive' },
+}
+
+// ── Searchable dropdown (type-to-filter combobox) ────────────────────────────
+
+type SelectOption = { value: string; label: string; sublabel?: string; keywords?: string }
+
+/** Plays on-demand voice samples (the same /api/voice-samples/<name>.wav
+ *  endpoint the voice gallery uses). `toggle` starts a sample, or stops it if
+ *  that voice is already playing. Only one sample plays at a time. */
+function useVoicePreview() {
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const [playing, setPlaying] = useState<string | null>(null)
+  const [loading, setLoading] = useState<string | null>(null)
+
+  const toggle = useCallback((name: string) => {
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null }
+    if (playing === name) { setPlaying(null); return }
+    setLoading(name)
+    const audio = new Audio(`${backendBase()}/api/voice-samples/${name}.wav`)
+    audioRef.current = audio
+    audio.onplaying = () => { setLoading(null); setPlaying(name) }
+    audio.onended  = () => { setPlaying(null); audioRef.current = null }
+    audio.onerror  = () => { setLoading(null); setPlaying(null); audioRef.current = null }
+    audio.play().catch(() => { setLoading(null); setPlaying(null) })
+  }, [playing])
+
+  useEffect(() => () => { audioRef.current?.pause(); audioRef.current = null }, [])
+
+  return { playing, loading, toggle }
+}
+
+/** A <select>-styled combobox: click to open, type to filter by label, sublabel
+ *  or keywords. Used for the language / agent / voice pickers, whose lists are
+ *  long enough that plain scrolling is painful. `value` is always a string —
+ *  for the agent picker pass String(index) and parse it back in onChange.
+ *  With `preview`, each option gets a play button that auditions its voice. */
+function SearchableSelect({
+  value, onChange, options, disabled, placeholder = 'Select…', searchPlaceholder = 'Type to search…', preview = false,
+}: {
+  value: string
+  onChange: (value: string) => void
+  options: SelectOption[]
+  disabled?: boolean
+  placeholder?: string
+  searchPlaceholder?: string
+  preview?: boolean
+}) {
+  const { playing, loading, toggle } = useVoicePreview()
+  const [open, setOpen] = useState(false)
+  const [query, setQuery] = useState('')
+  // Trigger geometry — the menu is portalled to <body> with fixed positioning
+  // so it escapes any ancestor with overflow-hidden/auto (cards clip it
+  // otherwise). `up` flips the menu above the trigger when there's no room below.
+  const [pos, setPos] = useState<{ left: number; width: number; rectTop: number; rectBottom: number; vh: number; up: boolean } | null>(null)
+  const rootRef = useRef<HTMLDivElement>(null)
+  const menuRef = useRef<HTMLDivElement>(null)
+  const inputRef = useRef<HTMLInputElement>(null)
+
+  const selected = options.find(o => o.value === value) || null
+  const q = query.trim().toLowerCase()
+  const filtered = q
+    ? options.filter(o => `${o.label} ${o.sublabel || ''} ${o.keywords || ''}`.toLowerCase().includes(q))
+    : options
+
+  const measure = useCallback(() => {
+    const el = rootRef.current
+    if (!el) return
+    const r = el.getBoundingClientRect()
+    const spaceBelow = window.innerHeight - r.bottom
+    const up = spaceBelow < 280 && r.top > spaceBelow
+    setPos({ left: r.left, width: r.width, rectTop: r.top, rectBottom: r.bottom, vh: window.innerHeight, up })
+  }, [])
+
+  // Position the menu before paint, and keep it pinned on scroll/resize.
+  useLayoutEffect(() => { if (open) measure() }, [open, measure])
+  useEffect(() => {
+    if (!open) return
+    function onDown(e: MouseEvent) {
+      const t = e.target as Node
+      if (rootRef.current?.contains(t) || menuRef.current?.contains(t)) return
+      setOpen(false); setQuery('')
+    }
+    function onKey(e: KeyboardEvent) { if (e.key === 'Escape') { setOpen(false); setQuery('') } }
+    document.addEventListener('mousedown', onDown)
+    document.addEventListener('keydown', onKey)
+    window.addEventListener('resize', measure)
+    window.addEventListener('scroll', measure, true)
+    return () => {
+      document.removeEventListener('mousedown', onDown)
+      document.removeEventListener('keydown', onKey)
+      window.removeEventListener('resize', measure)
+      window.removeEventListener('scroll', measure, true)
+    }
+  }, [open, measure])
+
+  // Focus the search box as soon as the menu opens.
+  useEffect(() => { if (open) inputRef.current?.focus() }, [open])
+
+  function pick(v: string) { onChange(v); setOpen(false); setQuery('') }
+
+  return (
+    <div className="relative" ref={rootRef}>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => setOpen(o => !o)}
+        className="w-full flex items-center gap-2 bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground text-left focus:outline-none focus:border-primary disabled:opacity-50 disabled:cursor-not-allowed"
+      >
+        <span className="flex-1 min-w-0 truncate">
+          {selected ? (
+            <>
+              {selected.label}
+              {selected.sublabel && <span className="text-muted-foreground"> — {selected.sublabel}</span>}
+            </>
+          ) : (
+            <span className="text-muted-foreground">{placeholder}</span>
+          )}
+        </span>
+        <ChevronDown className={`w-4 h-4 text-muted-foreground flex-shrink-0 transition-transform ${open ? 'rotate-180' : ''}`} />
+      </button>
+
+      {open && pos && createPortal(
+        <div
+          ref={menuRef}
+          style={{
+            position: 'fixed',
+            zIndex: 1000,
+            left: pos.left,
+            width: pos.width,
+            ...(pos.up
+              ? { bottom: pos.vh - pos.rectTop + 4 }
+              : { top: pos.rectBottom + 4 }),
+            maxHeight: (pos.up ? pos.rectTop : pos.vh - pos.rectBottom) - 12,
+          }}
+          className="flex flex-col rounded-lg border border-border bg-card shadow-lg overflow-hidden"
+        >
+          {/* When the menu flips upward, the search bar sits at the bottom (next
+              to the trigger) and results scroll above it; `order` reorders the
+              flex children without duplicating markup. */}
+          <div className={`p-2 bg-card flex-shrink-0 ${pos.up ? 'order-2 border-t' : 'order-1 border-b'} border-border`}>
+            <div className="relative">
+              <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 w-3.5 h-3.5 text-muted-foreground pointer-events-none" />
+              <input
+                ref={inputRef}
+                value={query}
+                onChange={e => setQuery(e.target.value)}
+                placeholder={searchPlaceholder}
+                className="w-full bg-muted/50 border border-border rounded-md pl-8 pr-3 py-1.5 text-sm text-foreground focus:outline-none focus:border-primary"
+              />
+            </div>
+          </div>
+          <div className={`overflow-auto py-1 ${pos.up ? 'order-1' : 'order-2'}`}>
+            {filtered.length === 0 ? (
+              <div className="px-3 py-3 text-xs text-muted-foreground text-center">No matches</div>
+            ) : (
+              filtered.map(o => (
+                <div
+                  key={o.value}
+                  onClick={() => pick(o.value)}
+                  className={`w-full flex items-center gap-2 px-3 py-2 text-left text-sm cursor-pointer hover:bg-muted/70 transition-colors ${
+                    o.value === value ? 'bg-primary/10 text-primary font-medium' : 'text-foreground'
+                  }`}
+                >
+                  <span className="flex-1 min-w-0 truncate">
+                    {o.label}
+                    {o.sublabel && (
+                      <span className={o.value === value ? 'text-primary/80' : 'text-muted-foreground'}> — {o.sublabel}</span>
+                    )}
+                  </span>
+                  {o.value === value && <CheckCircle2 className="w-4 h-4 flex-shrink-0" />}
+                  {preview && (
+                    <button
+                      type="button"
+                      onClick={e => { e.stopPropagation(); toggle(o.value) }}
+                      title={playing === o.value ? 'Stop' : 'Play sample'}
+                      className="flex-shrink-0 w-6 h-6 rounded-full flex items-center justify-center text-muted-foreground hover:bg-primary/15 hover:text-primary transition-colors"
+                    >
+                      {loading === o.value ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        : playing === o.value ? <X className="w-3.5 h-3.5" />
+                        : <Play className="w-3.5 h-3.5 ml-0.5" />}
+                    </button>
+                  )}
+                </div>
+              ))
+            )}
+          </div>
+        </div>,
+        document.body,
+      )}
+    </div>
+  )
 }
 
 // ── Twilio Config Card ───────────────────────────────────────────────────────
@@ -834,51 +1049,37 @@ function OutboundDialer() {
 
         <div>
           <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1.5 block">Agent</label>
-          <div className="relative">
-            <select
-              value={templateIdx}
-              onChange={e => handleTemplateChange(Number(e.target.value))}
-              disabled={busy}
-              className="w-full appearance-none bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground pr-8 focus:outline-none focus:border-primary disabled:opacity-50"
-            >
-              {templates.map((t, i) => <option key={i} value={i}>{t.label}</option>)}
-            </select>
-            <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
-          </div>
+          <SearchableSelect
+            value={String(templateIdx)}
+            onChange={v => handleTemplateChange(Number(v))}
+            options={templates.map((t, i) => ({ value: String(i), label: t.label }))}
+            disabled={busy}
+            searchPlaceholder="Search agents…"
+          />
         </div>
 
         <div>
           <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1.5 block">Language</label>
-          <div className="relative">
-            <select
-              value={language}
-              onChange={e => setLanguage(e.target.value)}
-              disabled={busy}
-              className="w-full appearance-none bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground pr-8 focus:outline-none focus:border-primary disabled:opacity-50"
-            >
-              {LANGUAGES.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}
-            </select>
-            <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
-          </div>
+          <SearchableSelect
+            value={language}
+            onChange={setLanguage}
+            options={LANGUAGE_OPTIONS}
+            disabled={busy}
+            searchPlaceholder="Search languages…"
+          />
         </div>
 
         <div className="sm:col-span-2">
           <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1.5 block">Voice</label>
-          <div className="relative">
-            <select
-              value={voice}
-              onChange={e => setVoice(e.target.value)}
-              disabled={busy}
-              className="w-full appearance-none bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground pr-8 focus:outline-none focus:border-primary disabled:opacity-50"
-            >
-              {VOICES.map(v => (
-                <option key={v.name} value={v.name}>
-                  {v.name} ({v.gender === 'F' ? 'Female' : v.gender === 'M' ? 'Male' : 'Neutral'}) — {v.style}
-                </option>
-              ))}
-            </select>
-            <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
-          </div>
+          <SearchableSelect
+            value={voice}
+            onChange={setVoice}
+            options={VOICE_OPTIONS}
+            disabled={busy}
+            preview
+            searchPlaceholder="Search voices by name, gender or style…"
+          />
+          <p className="text-[11px] text-muted-foreground mt-1">All Gemini voices are multilingual — they speak whichever language you pick above.</p>
         </div>
 
         <div className="sm:col-span-2">
@@ -935,6 +1136,22 @@ type CallSummary = {
   turn_count: number
   summary: string | null
   sentiment: string | null
+  has_recording: boolean
+  cost_usd: number | null
+}
+
+type CallUsage = {
+  input_tokens: number
+  output_tokens: number
+  total_tokens: number
+  telephony_min: number
+  usd_inr_rate: number
+  gemini_usd: number
+  telephony_usd: number
+  cost_usd: number
+  gemini_inr: number
+  telephony_inr: number
+  cost_inr: number
 }
 
 type TranscriptItem = {
@@ -954,6 +1171,7 @@ type CallDetail = CallSummary & {
   transcript: TranscriptItem[]
   error_message: string | null
   extracted: Record<string, unknown> | unknown[] | null
+  usage: CallUsage | null
 }
 
 const SENTIMENT_BADGE: Record<string, string> = {
@@ -992,12 +1210,38 @@ type CallStats = {
   errored_calls: number
   avg_duration_s: number
   total_duration_s: number
+  total_cost_usd: number
+  avg_cost_usd: number
+  total_cost_inr: number
+  avg_cost_inr: number
+  usd_inr_rate: number
+  total_input_tokens: number
+  total_output_tokens: number
   by_type: { key: string; count: number }[]
   by_language: { key: string; count: number }[]
   by_sentiment: Record<string, number>
   by_voice: { key: string; count: number }[]
   top_tools: { key: string; count: number }[]
   calls_by_day: { day: string; count: number }[]
+  cost_by_day: { day: string; cost: number }[]
+}
+
+/** Format a USD cost compactly: sub-cent shows 4 dp, otherwise 2–3 dp. */
+function formatUsd(v: number | null | undefined): string {
+  if (v == null) return '—'
+  if (v === 0) return '$0'
+  if (v < 0.01) return `$${v.toFixed(4)}`
+  if (v < 1) return `$${v.toFixed(3)}`
+  return `$${v.toFixed(2)}`
+}
+
+/** Format an INR cost compactly. */
+function formatInr(v: number | null | undefined): string {
+  if (v == null) return '—'
+  if (v === 0) return '₹0'
+  if (v < 1) return `₹${v.toFixed(2)}`
+  if (v < 100) return `₹${v.toFixed(2)}`
+  return `₹${Math.round(v).toLocaleString('en-IN')}`
 }
 
 function StatCard({ icon: Icon, label, value, sub, color }: {
@@ -1083,6 +1327,8 @@ function AnalyticsView() {
   const sentiments = stats?.by_sentiment || {}
   const sentTotal = (sentiments.positive || 0) + (sentiments.neutral || 0) + (sentiments.negative || 0)
   const dayMax = Math.max(1, ...(stats?.calls_by_day || []).map(d => d.count))
+  const costDays = stats?.cost_by_day || []
+  const costMax = Math.max(0.0001, ...costDays.map(d => d.cost))
 
   return (
     <div className="flex-1 flex flex-col min-h-0 p-6 gap-5 overflow-y-auto">
@@ -1109,11 +1355,13 @@ function AnalyticsView() {
       ) : (
         <>
           {/* Top stat cards */}
-          <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          <div className="grid grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-4">
             <StatCard icon={ListVideo} label="Total Calls" value={String(stats.total_calls)}
               sub={`${stats.ended_calls} ended · ${stats.active_calls} active`} color="bg-blue-500/10 text-blue-600 dark:text-blue-400" />
             <StatCard icon={Clock} label="Avg Duration" value={formatDuration(stats.avg_duration_s)}
               sub={`${formatDuration(stats.total_duration_s)} total`} color="bg-violet-500/10 text-violet-600 dark:text-violet-400" />
+            <StatCard icon={IndianRupee} label="Est. Cost" value={formatInr(stats.total_cost_inr)}
+              sub={`${formatUsd(stats.total_cost_usd)} · ${formatInr(stats.avg_cost_inr)} avg/call`} color="bg-amber-500/10 text-amber-600 dark:text-amber-400" />
             <StatCard icon={TrendingUp} label="Positive" value={`${sentTotal ? Math.round((sentiments.positive || 0) / sentTotal * 100) : 0}%`}
               sub={`${sentTotal} analysed`} color="bg-green-500/10 text-green-600 dark:text-green-400" />
             <StatCard icon={AlertTriangle} label="Errored" value={String(stats.errored_calls)}
@@ -1182,6 +1430,36 @@ function AnalyticsView() {
             </div>
           </div>
 
+          {/* Cost per day */}
+          <div className="rounded-2xl border border-border/70 bg-card p-5">
+            <div className="flex items-center justify-between mb-5">
+              <h3 className="text-sm font-semibold text-foreground">Estimated cost per day</h3>
+              <span className="text-xs font-medium text-muted-foreground tabular-nums">
+                {formatInr(stats.total_cost_inr)} · {formatUsd(stats.total_cost_usd)} total
+              </span>
+            </div>
+            {costDays.length === 0 ? (
+              <p className="text-xs text-muted-foreground py-2">No cost data yet.</p>
+            ) : (
+              <div className="flex items-end gap-3 h-40">
+                {costDays.map(d => (
+                  <div key={d.day} className="flex-1 flex flex-col items-center gap-2 h-full group">
+                    <div className="w-full flex-1 flex items-end justify-center">
+                      <div
+                        className="w-full max-w-[34px] bg-amber-500/85 group-hover:bg-amber-500 rounded-t-md transition-all duration-500"
+                        style={{ height: `${Math.max((d.cost / costMax) * 100, d.cost > 0 ? 4 : 0)}%` }}
+                        title={`${d.day}: ${formatInr(d.cost * stats.usd_inr_rate)} (${formatUsd(d.cost)})`}
+                      />
+                    </div>
+                    <span className="text-[10px] font-semibold text-foreground/80 tabular-nums">{formatInr(d.cost * stats.usd_inr_rate)}</span>
+                    <span className="text-[10px] text-muted-foreground">{d.day.slice(5)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+            <p className="text-[10px] text-muted-foreground/70 mt-3">Estimate — Gemini audio tokens + telephony minutes at configured rates (₹{stats.usd_inr_rate}/$).</p>
+          </div>
+
           {/* Breakdown grids */}
           <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
             <BarList title="By channel" data={stats.by_type} labelMap={typeMap} accent="blue" />
@@ -1222,6 +1500,22 @@ function CallsView() {
   }, [])
 
   useEffect(() => { load(page) }, [load, page])
+
+  const [deleting, setDeleting] = useState(false)
+  const deleteCall = useCallback(async (id: number) => {
+    if (!window.confirm(`Delete Call #${id}? Its transcript and recording are removed permanently.`)) return
+    setDeleting(true)
+    try {
+      const res = await fetch(`${backendBase()}/api/gemini-calls/${id}`, { method: 'DELETE' })
+      if (!res.ok) throw new Error(`Failed: ${res.status}`)
+      setSelected(null)
+      await load(page)
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setDeleting(false)
+    }
+  }, [load, page])
 
   const pageCount = Math.max(1, Math.ceil(total / CALLS_PAGE_SIZE))
   const rangeStart = total === 0 ? 0 : page * CALLS_PAGE_SIZE + 1
@@ -1381,6 +1675,14 @@ function CallsView() {
                     {formatDateTime(selected.started_at)} · {formatDuration(selected.duration_s)}
                   </p>
                 </div>
+                <button
+                  onClick={() => deleteCall(selected.id)}
+                  disabled={deleting}
+                  title="Delete call"
+                  className="w-8 h-8 rounded-lg flex items-center justify-center text-muted-foreground hover:bg-destructive/10 hover:text-destructive transition-colors disabled:opacity-50"
+                >
+                  <Trash2 className="w-4 h-4" />
+                </button>
               </div>
               <button onClick={() => setSelected(null)} className="w-9 h-9 rounded-lg hover:bg-muted flex items-center justify-center text-muted-foreground transition-colors">
                 <X className="w-4 h-4" />
@@ -1413,6 +1715,56 @@ function CallsView() {
                     {selected.summary
                       ? <p className="text-sm text-foreground leading-relaxed">{selected.summary}</p>
                       : <p className="text-xs text-muted-foreground italic">No summary generated.</p>}
+                  </div>
+                )}
+
+                {selected.has_recording && (
+                  <div className="rounded-xl border border-border bg-muted/20 px-4 py-3 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <Music className="w-3.5 h-3.5 text-primary" />
+                      <span className="text-[11px] font-bold uppercase tracking-wide text-muted-foreground">Recording</span>
+                    </div>
+                    <audio
+                      controls
+                      preload="none"
+                      className="w-full h-9"
+                      src={`${backendBase()}/api/gemini-calls/${selected.id}/recording.wav`}
+                    />
+                  </div>
+                )}
+
+                {selected.usage && (
+                  <div className="rounded-xl border border-border bg-muted/20 px-4 py-3">
+                    <div className="flex items-center justify-between">
+                      <div className="flex items-center gap-2">
+                        <IndianRupee className="w-3.5 h-3.5 text-primary" />
+                        <span className="text-[11px] font-bold uppercase tracking-wide text-muted-foreground">Estimated cost</span>
+                      </div>
+                      <span className="text-sm font-bold text-foreground tabular-nums">
+                        {formatInr(selected.usage.cost_inr)} <span className="text-muted-foreground font-medium">· {formatUsd(selected.usage.cost_usd)}</span>
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-x-4 gap-y-2 pt-3">
+                      <div className="flex flex-col">
+                        <span className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground">Gemini</span>
+                        <span className="text-xs text-foreground tabular-nums">{formatInr(selected.usage.gemini_inr)} · {formatUsd(selected.usage.gemini_usd)}</span>
+                      </div>
+                      {selected.call_type !== 'browser' && (
+                        <div className="flex flex-col">
+                          <span className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground">Telephony</span>
+                          <span className="text-xs text-foreground tabular-nums">{formatInr(selected.usage.telephony_inr)} · {selected.usage.telephony_min}m</span>
+                        </div>
+                      )}
+                      <div className="flex flex-col">
+                        <span className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground">Tokens in</span>
+                        <span className="text-xs text-foreground tabular-nums">{selected.usage.input_tokens.toLocaleString()}</span>
+                      </div>
+                      <div className="flex flex-col">
+                        <span className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground">Tokens out</span>
+                        <span className="text-xs text-foreground tabular-nums">{selected.usage.output_tokens.toLocaleString()}</span>
+                      </div>
+                    </div>
+                    <p className="text-[10px] text-muted-foreground/70 mt-2">Estimate — Gemini audio tokens + telephony minutes at configured rates (₹{selected.usage.usd_inr_rate}/$).</p>
                   </div>
                 )}
 
@@ -3012,29 +3364,23 @@ function AgentEditor({ editing, draft, setDraft, allTools, ambience, kbCollectio
           <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div>
               <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1.5 block">Language</label>
-              <div className="relative">
-                <select
-                  value={draft.language}
-                  onChange={e => setDraft({ ...draft, language: e.target.value })}
-                  className="w-full appearance-none bg-background border border-border rounded-lg px-3 py-2 text-sm pr-8 focus:outline-none focus:border-primary"
-                >
-                  {LANGUAGES.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}
-                </select>
-                <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
-              </div>
+              <SearchableSelect
+                value={draft.language}
+                onChange={v => setDraft({ ...draft, language: v })}
+                options={LANGUAGE_OPTIONS}
+                searchPlaceholder="Search languages…"
+              />
             </div>
             <div>
               <label className="text-xs font-semibold uppercase tracking-wide text-muted-foreground mb-1.5 block">Voice</label>
-              <div className="relative">
-                <select
-                  value={draft.voice}
-                  onChange={e => setDraft({ ...draft, voice: e.target.value })}
-                  className="w-full appearance-none bg-background border border-border rounded-lg px-3 py-2 text-sm pr-8 focus:outline-none focus:border-primary"
-                >
-                  {VOICES.map(v => <option key={v.name} value={v.name}>{v.name} ({v.gender}) — {v.style}</option>)}
-                </select>
-                <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
-              </div>
+              <SearchableSelect
+                value={draft.voice}
+                onChange={v => setDraft({ ...draft, voice: v })}
+                options={VOICE_OPTIONS}
+                preview
+                searchPlaceholder="Search voices by name, gender or style…"
+              />
+              <p className="text-[11px] text-muted-foreground mt-1">Voices are multilingual — they adapt to the selected language.</p>
             </div>
           </div>
         </section>
@@ -4579,52 +4925,38 @@ export default function GeminiPage() {
 
                 <div className="space-y-3">
                   <div>
-                    <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1.5 block">Template</label>
-                    <div className="relative">
-                      <select
-                        value={templateIdx}
-                        onChange={e => handleTemplateChange(Number(e.target.value))}
-                        disabled={isActive}
-                        className="w-full appearance-none bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground pr-8 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:border-primary"
-                      >
-                        {templates.map((t, i) => <option key={i} value={i}>{t.label}</option>)}
-                      </select>
-                      <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
-                    </div>
+                    <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1.5 block">Agent</label>
+                    <SearchableSelect
+                      value={String(templateIdx)}
+                      onChange={v => handleTemplateChange(Number(v))}
+                      options={templates.map((t, i) => ({ value: String(i), label: t.label }))}
+                      disabled={isActive}
+                      searchPlaceholder="Search agents…"
+                    />
                   </div>
 
                   <div>
                     <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1.5 block">Language</label>
-                    <div className="relative">
-                      <select
-                        value={language}
-                        onChange={e => setLanguage(e.target.value)}
-                        disabled={isActive}
-                        className="w-full appearance-none bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground pr-8 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:border-primary"
-                      >
-                        {LANGUAGES.map(l => <option key={l.code} value={l.code}>{l.label}</option>)}
-                      </select>
-                      <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
-                    </div>
+                    <SearchableSelect
+                      value={language}
+                      onChange={setLanguage}
+                      options={LANGUAGE_OPTIONS}
+                      disabled={isActive}
+                      searchPlaceholder="Search languages…"
+                    />
                   </div>
 
                   <div>
                     <label className="text-xs font-semibold text-muted-foreground uppercase tracking-wide mb-1.5 block">Voice</label>
-                    <div className="relative">
-                      <select
-                        value={voice}
-                        onChange={e => setVoice(e.target.value)}
-                        disabled={isActive}
-                        className="w-full appearance-none bg-background border border-border rounded-lg px-3 py-2 text-sm text-foreground pr-8 disabled:opacity-50 disabled:cursor-not-allowed focus:outline-none focus:border-primary"
-                      >
-                        {VOICES.map(v => (
-                          <option key={v.name} value={v.name}>
-                            {v.name} ({v.gender === 'F' ? 'Female' : v.gender === 'M' ? 'Male' : 'Neutral'}) — {v.style}
-                          </option>
-                        ))}
-                      </select>
-                      <ChevronDown className="absolute right-2.5 top-1/2 -translate-y-1/2 w-4 h-4 text-muted-foreground pointer-events-none" />
-                    </div>
+                    <SearchableSelect
+                      value={voice}
+                      onChange={setVoice}
+                      options={VOICE_OPTIONS}
+                      disabled={isActive}
+                      preview
+                      searchPlaceholder="Search voices by name, gender or style…"
+                    />
+                    <p className="text-[11px] text-muted-foreground mt-1">Voices are multilingual — they speak the selected language.</p>
                   </div>
                 </div>
               </div>

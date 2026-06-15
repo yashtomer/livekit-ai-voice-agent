@@ -7,14 +7,23 @@ interface GeminiCallProps {
   onClose: () => void
 }
 
+// Full Indian-language set plus major global languages (see GeminiPage.tsx /
+// backend LANGUAGE_NAMES — keep all three in sync). Codes are ISO-639-1.
 const LANGUAGES = [
   { code: 'en', label: 'English' }, { code: 'hi', label: 'Hindi' },
-  { code: 'bn', label: 'Bengali' }, { code: 'ta', label: 'Tamil' },
-  { code: 'te', label: 'Telugu' }, { code: 'mr', label: 'Marathi' },
-  { code: 'gu', label: 'Gujarati' }, { code: 'es', label: 'Spanish' },
+  // Indian languages
+  { code: 'as', label: 'Assamese' }, { code: 'bn', label: 'Bengali' },
+  { code: 'gu', label: 'Gujarati' }, { code: 'kn', label: 'Kannada' },
+  { code: 'ml', label: 'Malayalam' }, { code: 'mr', label: 'Marathi' },
+  { code: 'or', label: 'Odia' }, { code: 'pa', label: 'Punjabi' },
+  { code: 'ta', label: 'Tamil' }, { code: 'te', label: 'Telugu' },
+  { code: 'ur', label: 'Urdu' },
+  // Major global languages
+  { code: 'ar', label: 'Arabic' }, { code: 'zh', label: 'Chinese (Mandarin)' },
   { code: 'fr', label: 'French' }, { code: 'de', label: 'German' },
-  { code: 'ja', label: 'Japanese' }, { code: 'ko', label: 'Korean' },
-  { code: 'zh', label: 'Chinese' },
+  { code: 'it', label: 'Italian' }, { code: 'ja', label: 'Japanese' },
+  { code: 'ko', label: 'Korean' }, { code: 'pt', label: 'Portuguese' },
+  { code: 'ru', label: 'Russian' }, { code: 'es', label: 'Spanish' },
 ]
 
 const TEMPLATES = [

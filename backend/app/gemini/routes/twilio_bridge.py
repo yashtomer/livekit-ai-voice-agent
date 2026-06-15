@@ -43,10 +43,17 @@ INPUT_SAMPLE_RATE = 16000
 
 PHONE_SYSTEM_PROMPT = os.environ.get("PHONE_SYSTEM_PROMPT") or DEFAULT_PHONE_AGENT
 
+# Full Indian-language set plus the major global languages.
+# Keep in sync with the LANGUAGES list in frontend/src/pages/GeminiPage.tsx.
 LANGUAGE_NAMES = {
-    "en": "English", "hi": "Hindi", "bn": "Bengali", "ta": "Tamil",
-    "te": "Telugu", "mr": "Marathi", "gu": "Gujarati", "es": "Spanish",
-    "fr": "French", "de": "German", "ja": "Japanese", "ko": "Korean", "zh": "Chinese",
+    # Indian languages
+    "en": "English", "hi": "Hindi", "as": "Assamese", "bn": "Bengali",
+    "gu": "Gujarati", "kn": "Kannada", "ml": "Malayalam", "mr": "Marathi",
+    "or": "Odia", "pa": "Punjabi", "ta": "Tamil", "te": "Telugu", "ur": "Urdu",
+    # Major global languages
+    "ar": "Arabic", "zh": "Chinese", "fr": "French", "de": "German",
+    "it": "Italian", "ja": "Japanese", "ko": "Korean", "pt": "Portuguese",
+    "ru": "Russian", "es": "Spanish",
 }
 
 

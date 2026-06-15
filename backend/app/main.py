@@ -67,6 +67,20 @@ async def _migrate_schema() -> None:
             "ALTER TABLE gemini_agents ADD COLUMN IF NOT EXISTS "
             "ambient_volume DOUBLE PRECISION NOT NULL DEFAULT 0.15"
         ))
+        # gemini_call_logs.recording_path — filename of the saved call recording.
+        await conn.execute(text(
+            "ALTER TABLE gemini_call_logs ADD COLUMN IF NOT EXISTS "
+            "recording_path VARCHAR(255)"
+        ))
+        # gemini_call_logs.cost_usd / usage — estimated per-call cost + breakdown.
+        await conn.execute(text(
+            "ALTER TABLE gemini_call_logs ADD COLUMN IF NOT EXISTS "
+            "cost_usd DOUBLE PRECISION"
+        ))
+        await conn.execute(text(
+            "ALTER TABLE gemini_call_logs ADD COLUMN IF NOT EXISTS "
+            "usage JSONB"
+        ))
         # Vector similarity index on the KB chunks table — only if the
         # extension and table both exist (pgvector_enabled may be False).
         if "gemini_kb_chunks" in Base.metadata.tables:
