@@ -122,6 +122,21 @@ async def add_transcript(call_id: Optional[int], role: str, text: str) -> None:
         log.exception("gemini_logger.add_transcript failed")
 
 
+async def set_recording(call_id: Optional[int], filename: Optional[str]) -> None:
+    """Persist the saved recording filename onto the call row. Best-effort."""
+    if not call_id or not filename:
+        return
+    try:
+        async with SessionLocal() as db:
+            row = (await db.execute(select(GeminiCallLog).where(GeminiCallLog.id == call_id))).scalar_one_or_none()
+            if not row:
+                return
+            row.recording_path = filename
+            await db.commit()
+    except Exception:
+        log.exception("gemini_logger.set_recording failed")
+
+
 async def add_tool_event(call_id: Optional[int], name: str, args: dict, result: Any,
                           request: Optional[dict] = None) -> None:
     """Record a tool/function call in the transcript timeline (role='tool').
@@ -167,6 +182,8 @@ async def end_call(
     reason: Optional[str] = None,
     error_message: Optional[str] = None,
     api_key: Optional[str] = None,
+    input_tokens: Optional[int] = None,
+    output_tokens: Optional[int] = None,
 ) -> None:
     if not call_id:
         return
@@ -190,6 +207,23 @@ async def end_call(
             if row.started_at:
                 started = row.started_at
                 row.duration_s = max(0, int((ended - started).total_seconds()))
+            # Estimated cost: Gemini token usage + telephony minutes. Duration is
+            # now known, so telephony can be priced here too. Best-effort.
+            if input_tokens is not None or output_tokens is not None:
+                try:
+                    from .pricing import estimate_cost
+                    from ...routes.fx_route import get_usd_inr_rate
+                    breakdown = estimate_cost(
+                        call_type=row.call_type,
+                        input_tokens=input_tokens,
+                        output_tokens=output_tokens,
+                        duration_s=row.duration_s,
+                        usd_inr_rate=await get_usd_inr_rate(),
+                    )
+                    row.cost_usd = breakdown["cost_usd"]
+                    row.usage = breakdown
+                except Exception:
+                    log.exception("cost estimation failed for call %d", call_id)
             transcript = list(row.transcript or [])
             call_type = row.call_type
             phone_number = row.phone_number

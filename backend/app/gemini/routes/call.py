@@ -23,9 +23,11 @@ from ...models.api_key import UserAPIKey
 from ...services.auth import decode_token
 from ...services.encryption import decrypt_key
 from ..services.logger import (
-    start_call, add_transcript, add_tool_event, end_call,
+    start_call, add_transcript, add_tool_event, end_call, set_recording,
     classify_disconnect, REASON_AGENT_ENDED, REASON_CLIENT_DISCONNECTED,
 )
+from ..services.recorder import CallRecorder
+from ..services.pricing import UsageTracker
 from ..services.sentiment import score_text
 from ..ambience import AmbientMixer
 
@@ -46,10 +48,17 @@ except ValueError:
     OFF_TOPIC_THRESHOLD = 3
 INPUT_SAMPLE_RATE = 16000
 
+# Full Indian-language set plus the major global languages.
+# Keep in sync with the LANGUAGES list in frontend/src/pages/GeminiPage.tsx.
 LANGUAGE_NAMES = {
-    "en": "English", "hi": "Hindi", "bn": "Bengali", "ta": "Tamil",
-    "te": "Telugu", "mr": "Marathi", "gu": "Gujarati", "es": "Spanish",
-    "fr": "French", "de": "German", "ja": "Japanese", "ko": "Korean", "zh": "Chinese",
+    # Indian languages
+    "en": "English", "hi": "Hindi", "as": "Assamese", "bn": "Bengali",
+    "gu": "Gujarati", "kn": "Kannada", "ml": "Malayalam", "mr": "Marathi",
+    "or": "Odia", "pa": "Punjabi", "ta": "Tamil", "te": "Telugu", "ur": "Urdu",
+    # Major global languages
+    "ar": "Arabic", "zh": "Chinese", "fr": "French", "de": "German",
+    "it": "Italian", "ja": "Japanese", "ko": "Korean", "pt": "Portuguese",
+    "ru": "Russian", "es": "Spanish",
 }
 
 DEFAULT_SYSTEM_PROMPT = (
@@ -229,6 +238,11 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
         system_prompt=system_prompt,
     )
 
+    # Records both legs into one time-aligned WAV; saved at teardown.
+    recorder = CallRecorder(call_id)
+    # Accumulates Gemini token usage across reconnects for the cost estimate.
+    usage = UsageTracker()
+
     # End-of-call bookkeeping. `agent_ended` flips when the AI invokes the
     # end_call tool so teardown records AGENT_ENDED rather than a client hangup.
     end_state = {"agent_ended": False}
@@ -287,6 +301,7 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
                                 return
                             raw_bytes = msg.get("bytes")
                             if raw_bytes:
+                                recorder.add_caller(bytes(raw_bytes), INPUT_SAMPLE_RATE)
                                 try:
                                     await session.send_realtime_input(
                                         audio=types.Blob(
@@ -321,6 +336,7 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
                                 first_audio_ts = None
 
                                 async for response in session.receive():
+                                    usage.update(getattr(response, "usage_metadata", None))
                                     # Tool calls from Gemini
                                     tc = getattr(response, "tool_call", None)
                                     if tc and tc.function_calls:
@@ -390,6 +406,7 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
                                         continue
 
                                     if response.data:
+                                        recorder.add_agent(response.data, OUTPUT_SAMPLE_RATE)
                                         # First real audio after a tool call: stop the filler
                                         # (and let the always-mixer continue seamlessly).
                                         await stop_filler()
@@ -510,10 +527,19 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
     except Exception as exc:
         log.exception("Gemini WS error: %s", exc)
         await _send(websocket, {"type": "error", "message": str(exc)})
-        await end_call(call_id, status="error", reason=classify_disconnect(exc), error_message=str(exc))
+        await end_call(call_id, status="error", reason=classify_disconnect(exc), error_message=str(exc),
+                       input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)
         return
     finally:
+        # Persist the recording (best-effort) before the final bookkeeping.
+        try:
+            filename = recorder.save()
+            if filename:
+                await set_recording(call_id, filename)
+        except Exception:
+            log.exception("saving call recording failed")
         # On a clean finish: AGENT_ENDED if the AI hung up, otherwise the browser
         # client closed the socket (a browser call ends when the user leaves).
         reason = REASON_AGENT_ENDED if end_state["agent_ended"] else REASON_CLIENT_DISCONNECTED
-        await end_call(call_id, reason=reason, api_key=api_key)
+        await end_call(call_id, reason=reason, api_key=api_key,
+                       input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)

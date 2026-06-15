@@ -34,3 +34,10 @@ class GeminiCallLog(Base):
     summary: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     sentiment: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     extracted: Mapped[Any] = mapped_column(JSON, nullable=True)
+    # Filename of the saved call recording (mono WAV under RECORDINGS_DIR), or
+    # None if recording was disabled or nothing was captured.
+    recording_path: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    # Estimated total call cost (USD: Gemini tokens + telephony minutes) and the
+    # full breakdown ({input_tokens, output_tokens, gemini_usd, telephony_usd…}).
+    cost_usd: Mapped[Optional[float]] = mapped_column(nullable=True)
+    usage: Mapped[Any] = mapped_column(JSON, nullable=True)

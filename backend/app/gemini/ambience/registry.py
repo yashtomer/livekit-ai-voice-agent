@@ -24,17 +24,20 @@ class AmbienceDef:
 
 
 AMBIENCE_REGISTRY: tuple[AmbienceDef, ...] = (
-    AmbienceDef("office_busy",   "Busy office",          "always",    "Open-plan office: low chatter, periodic phone ring."),
-    AmbienceDef("office_quiet",  "Quiet office",         "always",    "Distant keyboards and HVAC hum."),
-    AmbienceDef("call_center",   "Call center",          "always",    "Several agents talking on calls in the background."),
+    # `always` — real recordings (assets/*.wav) override the procedural synth.
+    AmbienceDef("office_busy",   "Busy office",          "always",    "Open-plan office background — looped recording."),
+    AmbienceDef("office_quiet",  "Office environment",   "always",    "General office room tone — keyboards, movement, HVAC."),
+    AmbienceDef("call_center",   "Call center",          "always",    "Distant people talking in the background."),
     AmbienceDef("cafe",          "Cafe",                 "always",    "Coffee shop: cups, light chatter, espresso machine."),
     AmbienceDef("elevator",      "Elevator music",       "always",    "Soft instrumental hold-music."),
     AmbienceDef("street",        "Street / outdoor",     "always",    "Distant traffic and wind."),
 
-    AmbienceDef("typing",        "Typing",               "tool_call", "Mechanical keyboard typing, played during tool calls."),
-    AmbienceDef("mouse_clicks",  "Mouse clicks",         "tool_call", "Sporadic mouse clicks — searching a system."),
-    AmbienceDef("processing",    "Processing beeps",     "tool_call", "Soft computer beeps — looking something up."),
-    AmbienceDef("paper_shuffle", "Paper shuffle",        "tool_call", "Pages turning — checking a file."),
+    # `tool_call` — played only while the agent runs a tool / looks something up.
+    AmbienceDef("typing",          "Keyboard typing",    "tool_call", "Close mechanical keyboard typing — recording."),
+    AmbienceDef("community_typing", "Community typing",   "tool_call", "A room of people typing on keyboards — recording."),
+    AmbienceDef("paper_shuffle",   "Paper scroll",       "tool_call", "Shuffling and scrolling through papers — recording."),
+    AmbienceDef("mouse_clicks",    "Mouse clicks",       "tool_call", "Sporadic mouse clicks — searching a system."),
+    AmbienceDef("processing",      "Processing beeps",   "tool_call", "Soft computer beeps — looking something up."),
 )
 
 

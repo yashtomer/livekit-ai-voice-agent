@@ -51,10 +51,12 @@ from fastapi.responses import JSONResponse
 from ...models.user import User
 from ...routes.auth import get_current_user
 from ..services.logger import (
-    start_call, add_transcript, add_tool_event, end_call,
+    start_call, add_transcript, add_tool_event, end_call, set_recording,
     classify_disconnect, REASON_AGENT_ENDED, REASON_CLIENT_DISCONNECTED,
     REASON_MODEL_ERROR, REASON_COMPLETED,
 )
+from ..services.recorder import CallRecorder
+from ..services.pricing import UsageTracker
 from ..services.agents_store import get_default_phone_agent
 from ..services.tools_runtime import build_call_context, build_gemini_tools, dispatch_tool_call, render_template, load_tools_by_ids
 
@@ -120,10 +122,17 @@ except ValueError:
 
 PHONE_SYSTEM_PROMPT = os.environ.get("PHONE_SYSTEM_PROMPT") or DEFAULT_PHONE_AGENT
 
+# Full Indian-language set plus the major global languages.
+# Keep in sync with the LANGUAGES list in frontend/src/pages/GeminiPage.tsx.
 LANGUAGE_NAMES = {
-    "en": "English", "hi": "Hindi", "bn": "Bengali", "ta": "Tamil",
-    "te": "Telugu", "mr": "Marathi", "gu": "Gujarati", "es": "Spanish",
-    "fr": "French", "de": "German", "ja": "Japanese", "ko": "Korean", "zh": "Chinese",
+    # Indian languages
+    "en": "English", "hi": "Hindi", "as": "Assamese", "bn": "Bengali",
+    "gu": "Gujarati", "kn": "Kannada", "ml": "Malayalam", "mr": "Marathi",
+    "or": "Odia", "pa": "Punjabi", "ta": "Tamil", "te": "Telugu", "ur": "Urdu",
+    # Major global languages
+    "ar": "Arabic", "zh": "Chinese", "fr": "French", "de": "German",
+    "it": "Italian", "ja": "Japanese", "ko": "Korean", "pt": "Portuguese",
+    "ru": "Russian", "es": "Spanish",
 }
 
 
@@ -416,6 +425,10 @@ async def tata_stream(ws: WebSocket):
     out_state = None
     out_buf = bytearray()       # μ-law bytes pending 160-byte framing
     log_id: int | None = None
+    # Disabled until we have a log_id; reassigned once the call row is created.
+    recorder = CallRecorder(None)
+    # Accumulates Gemini token usage across reconnects for the cost estimate.
+    usage = UsageTracker()
     transfer_state = {"active": False}
     # True once the caller hung up / the WS dropped — TATA has already torn the
     # leg down, so we must NOT issue a (billable, pointless) active hangup.
@@ -501,6 +514,7 @@ async def tata_stream(ws: WebSocket):
                     voice=call_voice,
                     system_prompt=call_prompt,
                 )
+                recorder = CallRecorder(log_id)
             elif event == "stop":
                 return
     except WebSocketDisconnect:
@@ -583,6 +597,7 @@ async def tata_stream(ws: WebSocket):
                                     await send_greeting()
                                 mulaw = base64.b64decode(payload)
                                 pcm16k, in_state = _mulaw8k_to_pcm16k(mulaw, in_state)
+                                recorder.add_caller(pcm16k, INPUT_SAMPLE_RATE)
                                 try:
                                     await session.send_realtime_input(
                                         audio=types.Blob(data=pcm16k, mime_type=f"audio/pcm;rate={INPUT_SAMPLE_RATE}")
@@ -706,6 +721,7 @@ async def tata_stream(ws: WebSocket):
                         try:
                             while True:
                                 async for response in session.receive():
+                                    usage.update(getattr(response, "usage_metadata", None))
                                     # ─── Tool calls from Gemini ───
                                     tc = getattr(response, "tool_call", None)
                                     if tc and tc.function_calls:
@@ -844,6 +860,7 @@ async def tata_stream(ws: WebSocket):
                                         await ws.send_text(json.dumps({"event": "clear", "streamSid": stream_sid}))
                                     if response.data and stream_sid:
                                         productive_box["hit"] = True
+                                        recorder.add_agent(response.data, OUTPUT_SAMPLE_RATE)
                                         await _stop_filler()
                                         await _send_mixed(always_mixer.mix(response.data))
                                     if sc and sc.input_transcription and sc.input_transcription.text:
@@ -994,6 +1011,13 @@ async def tata_stream(ws: WebSocket):
         fatal_error = str(exc)
         fatal_exc = exc
     finally:
+        # Persist the recording (best-effort) before the rest of teardown.
+        try:
+            filename = recorder.save()
+            if filename:
+                await set_recording(log_id, filename)
+        except Exception:
+            log.exception("saving TATA call recording failed")
         # If WE ended the call (fatal error / Gemini unavailable / hold timeout)
         # while the caller is still connected, actively hang up the TATA leg so it
         # stops billing. Skip when the caller already hung up, or when a transfer
@@ -1005,7 +1029,8 @@ async def tata_stream(ws: WebSocket):
             # calls UI shows the exact reason and a WhatsApp callback fires.
             await end_call(log_id, status="error",
                            reason=classify_disconnect(fatal_exc),
-                           error_message=fatal_error)
+                           error_message=fatal_error,
+                           input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)
         else:
             # Clean teardown: figure out WHY the call ended.
             if agent_ended["v"]:
@@ -1020,7 +1045,8 @@ async def tata_stream(ws: WebSocket):
             # it as status="error" so it shows red and triggers the WhatsApp notify.
             status = "error" if reason == REASON_MODEL_ERROR else "ended"
             await end_call(log_id, status=status, reason=reason,
-                           api_key=GOOGLE_API_KEY or None)
+                           api_key=GOOGLE_API_KEY or None,
+                           input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)
         log.info(
             "📞 CALL ENDED (log_id=%s, call=%s) | by_caller=%s transferred=%s agent_ended=%s%s",
             log_id, tata_call_sid, ended_by_caller["v"], transfer_state["active"],
