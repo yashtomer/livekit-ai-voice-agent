@@ -56,7 +56,7 @@ from ..services.logger import (
     REASON_MODEL_ERROR, REASON_COMPLETED,
 )
 from ..services.recorder import CallRecorder
-from ..services.pricing import UsageTracker
+from ..services.pricing import UsageTracker, AudioMeter
 from ..services.agents_store import get_default_phone_agent
 from ..services.tools_runtime import build_call_context, build_gemini_tools, dispatch_tool_call, render_template, load_tools_by_ids
 
@@ -429,6 +429,8 @@ async def tata_stream(ws: WebSocket):
     recorder = CallRecorder(None)
     # Accumulates Gemini token usage across reconnects for the cost estimate.
     usage = UsageTracker()
+    # Meters audio seconds each way for per-minute Gemini pricing.
+    audio = AudioMeter(input_rate=INPUT_SAMPLE_RATE, output_rate=OUTPUT_SAMPLE_RATE)
     transfer_state = {"active": False}
     # True once the caller hung up / the WS dropped — TATA has already torn the
     # leg down, so we must NOT issue a (billable, pointless) active hangup.
@@ -598,6 +600,7 @@ async def tata_stream(ws: WebSocket):
                                 mulaw = base64.b64decode(payload)
                                 pcm16k, in_state = _mulaw8k_to_pcm16k(mulaw, in_state)
                                 recorder.add_caller(pcm16k, INPUT_SAMPLE_RATE)
+                                audio.add_input(pcm16k)
                                 try:
                                     await session.send_realtime_input(
                                         audio=types.Blob(data=pcm16k, mime_type=f"audio/pcm;rate={INPUT_SAMPLE_RATE}")
@@ -861,6 +864,7 @@ async def tata_stream(ws: WebSocket):
                                     if response.data and stream_sid:
                                         productive_box["hit"] = True
                                         recorder.add_agent(response.data, OUTPUT_SAMPLE_RATE)
+                                        audio.add_output(response.data)
                                         await _stop_filler()
                                         await _send_mixed(always_mixer.mix(response.data))
                                     if sc and sc.input_transcription and sc.input_transcription.text:
@@ -1030,7 +1034,8 @@ async def tata_stream(ws: WebSocket):
             await end_call(log_id, status="error",
                            reason=classify_disconnect(fatal_exc),
                            error_message=fatal_error,
-                           input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)
+                           token_usage=usage.totals(),
+                           input_seconds=audio.input_seconds, output_seconds=audio.output_seconds)
         else:
             # Clean teardown: figure out WHY the call ended.
             if agent_ended["v"]:
@@ -1046,7 +1051,8 @@ async def tata_stream(ws: WebSocket):
             status = "error" if reason == REASON_MODEL_ERROR else "ended"
             await end_call(log_id, status=status, reason=reason,
                            api_key=GOOGLE_API_KEY or None,
-                           input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)
+                           token_usage=usage.totals(),
+                           input_seconds=audio.input_seconds, output_seconds=audio.output_seconds)
         log.info(
             "📞 CALL ENDED (log_id=%s, call=%s) | by_caller=%s transferred=%s agent_ended=%s%s",
             log_id, tata_call_sid, ended_by_caller["v"], transfer_state["active"],
