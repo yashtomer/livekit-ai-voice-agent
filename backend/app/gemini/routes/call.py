@@ -130,9 +130,14 @@ def _make_live_config(system_prompt: str, language: str, voice: str = "Aoede", t
         ),
         realtime_input_config=types.RealtimeInputConfig(
             automatic_activity_detection=types.AutomaticActivityDetection(
-                start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
+                # LOW start-sensitivity: require a clear, near-field onset before
+                # opening a turn, so faint/far background voices don't trigger the
+                # agent. (HIGH fires on the quietest sound → background pickup.)
+                start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_LOW,
                 end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_HIGH,
-                prefix_padding_ms=20,
+                # A little more onset padding pairs well with LOW sensitivity so the
+                # first phoneme isn't clipped once real speech is detected.
+                prefix_padding_ms=80,
                 silence_duration_ms=100,
             ),
             activity_handling=types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,

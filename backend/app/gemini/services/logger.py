@@ -24,6 +24,7 @@ SUMMARY_MODEL = os.environ.get("GEMINI_SUMMARY_MODEL", "gemini-2.5-flash")
 REASON_COMPLETED          = "COMPLETED"            # call finished normally
 REASON_CLIENT_DISCONNECTED = "CLIENT_DISCONNECTED"  # caller/browser hung up
 REASON_AGENT_ENDED        = "AGENT_ENDED"          # AI agent ended the call
+REASON_VOICEMAIL          = "VOICEMAIL"            # outbound hit a voicemail / answering machine / IVR
 REASON_NETWORK_ISSUE      = "NETWORK_ISSUE"        # socket drop / connection reset / timeout
 REASON_MODEL_ERROR        = "MODEL_ERROR"          # Gemini 5xx / unavailable / overloaded
 REASON_INTERNAL_ERROR     = "INTERNAL_ERROR"       # anything else
