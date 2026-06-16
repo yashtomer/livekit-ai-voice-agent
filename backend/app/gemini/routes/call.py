@@ -27,7 +27,7 @@ from ..services.logger import (
     classify_disconnect, REASON_AGENT_ENDED, REASON_CLIENT_DISCONNECTED,
 )
 from ..services.recorder import CallRecorder
-from ..services.pricing import UsageTracker
+from ..services.pricing import UsageTracker, AudioMeter
 from ..services.sentiment import score_text
 from ..ambience import AmbientMixer
 
@@ -130,9 +130,14 @@ def _make_live_config(system_prompt: str, language: str, voice: str = "Aoede", t
         ),
         realtime_input_config=types.RealtimeInputConfig(
             automatic_activity_detection=types.AutomaticActivityDetection(
-                start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
+                # LOW start-sensitivity: require a clear, near-field onset before
+                # opening a turn, so faint/far background voices don't trigger the
+                # agent. (HIGH fires on the quietest sound → background pickup.)
+                start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_LOW,
                 end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_HIGH,
-                prefix_padding_ms=20,
+                # A little more onset padding pairs well with LOW sensitivity so the
+                # first phoneme isn't clipped once real speech is detected.
+                prefix_padding_ms=80,
                 silence_duration_ms=100,
             ),
             activity_handling=types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
@@ -242,6 +247,8 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
     recorder = CallRecorder(call_id)
     # Accumulates Gemini token usage across reconnects for the cost estimate.
     usage = UsageTracker()
+    # Meters audio seconds each way for per-minute Gemini pricing.
+    audio = AudioMeter(input_rate=INPUT_SAMPLE_RATE, output_rate=OUTPUT_SAMPLE_RATE)
 
     # End-of-call bookkeeping. `agent_ended` flips when the AI invokes the
     # end_call tool so teardown records AGENT_ENDED rather than a client hangup.
@@ -302,6 +309,7 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
                             raw_bytes = msg.get("bytes")
                             if raw_bytes:
                                 recorder.add_caller(bytes(raw_bytes), INPUT_SAMPLE_RATE)
+                                audio.add_input(raw_bytes)
                                 try:
                                     await session.send_realtime_input(
                                         audio=types.Blob(
@@ -407,6 +415,7 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
 
                                     if response.data:
                                         recorder.add_agent(response.data, OUTPUT_SAMPLE_RATE)
+                                        audio.add_output(response.data)
                                         # First real audio after a tool call: stop the filler
                                         # (and let the always-mixer continue seamlessly).
                                         await stop_filler()
@@ -528,7 +537,8 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
         log.exception("Gemini WS error: %s", exc)
         await _send(websocket, {"type": "error", "message": str(exc)})
         await end_call(call_id, status="error", reason=classify_disconnect(exc), error_message=str(exc),
-                       input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)
+                       token_usage=usage.totals(),
+                       input_seconds=audio.input_seconds, output_seconds=audio.output_seconds)
         return
     finally:
         # Persist the recording (best-effort) before the final bookkeeping.
@@ -542,4 +552,5 @@ async def gemini_ws(websocket: WebSocket, token: str = Query(default="")):
         # client closed the socket (a browser call ends when the user leaves).
         reason = REASON_AGENT_ENDED if end_state["agent_ended"] else REASON_CLIENT_DISCONNECTED
         await end_call(call_id, reason=reason, api_key=api_key,
-                       input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)
+                       token_usage=usage.totals(),
+                       input_seconds=audio.input_seconds, output_seconds=audio.output_seconds)

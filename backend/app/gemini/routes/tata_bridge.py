@@ -53,10 +53,10 @@ from ...routes.auth import get_current_user
 from ..services.logger import (
     start_call, add_transcript, add_tool_event, end_call, set_recording,
     classify_disconnect, REASON_AGENT_ENDED, REASON_CLIENT_DISCONNECTED,
-    REASON_MODEL_ERROR, REASON_COMPLETED,
+    REASON_MODEL_ERROR, REASON_COMPLETED, REASON_VOICEMAIL,
 )
 from ..services.recorder import CallRecorder
-from ..services.pricing import UsageTracker
+from ..services.pricing import UsageTracker, AudioMeter
 from ..services.agents_store import get_default_phone_agent
 from ..services.tools_runtime import build_call_context, build_gemini_tools, dispatch_tool_call, render_template, load_tools_by_ids
 
@@ -122,6 +122,36 @@ except ValueError:
 
 PHONE_SYSTEM_PROMPT = os.environ.get("PHONE_SYSTEM_PROMPT") or DEFAULT_PHONE_AGENT
 
+# ── Voicemail / answering-machine detection (outbound only) ───────────────────
+# Two layers: (1) a prompt clause telling the agent not to pitch a machine, and
+# (2) a deterministic backstop that scans the OPENING caller transcript for
+# voicemail/IVR phrases and hangs up regardless of what the model does.
+VOICEMAIL_DETECT = os.environ.get("VOICEMAIL_DETECT", "1").strip() not in ("0", "false", "no", "")
+# Only inspect roughly the first utterances — a real two-way conversation can
+# legitimately contain these words later, so we stop checking past this many chars.
+VOICEMAIL_SCAN_CHARS = 500
+
+VOICEMAIL_PROMPT = (
+    "\n\nVOICEMAIL / ANSWERING MACHINE: This is an outbound call. If the FIRST thing you "
+    "hear is a recorded greeting, voicemail, or automated system — e.g. 'please leave a "
+    "message after the tone', 'the person you are trying to reach is not available', "
+    "'press 1 for…', a beep, or any robotic IVR — do NOT start your pitch. Say nothing "
+    "further and call end_call immediately. We never leave voicemail messages."
+)
+
+_VOICEMAIL_PHRASES = [
+    "leave a message", "leave your message", "leave a brief message", "after the tone",
+    "after the beep", "at the tone", "at the beep", "record your message",
+    "your message after", "you have reached the voicemail", "reached the voice mail",
+    "the person you are trying to reach", "the number you have dialed",
+    "the number you are trying", "the subscriber you", "the customer you are trying",
+    "is not available", "is currently unavailable", "is switched off",
+    "is not reachable", "please leave", "please try again later", "please record",
+    "has been forwarded", "automated message", "this is an automated",
+    "press one", "press 1", "for english press", "para continuar",
+]
+VOICEMAIL_RE = re.compile("|".join(re.escape(p) for p in _VOICEMAIL_PHRASES), re.IGNORECASE)
+
 # Full Indian-language set plus the major global languages.
 # Keep in sync with the LANGUAGES list in frontend/src/pages/GeminiPage.tsx.
 LANGUAGE_NAMES = {
@@ -164,9 +194,14 @@ def _make_live_config(system_prompt: str, language: str, voice: str = "Aoede", t
         ),
         realtime_input_config=types.RealtimeInputConfig(
             automatic_activity_detection=types.AutomaticActivityDetection(
-                start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_HIGH,
+                # LOW start-sensitivity: require a clear, near-field onset before
+                # opening a turn, so faint/far background voices don't trigger the
+                # agent. (HIGH fires on the quietest sound → background pickup.)
+                start_of_speech_sensitivity=types.StartSensitivity.START_SENSITIVITY_LOW,
                 end_of_speech_sensitivity=types.EndSensitivity.END_SENSITIVITY_HIGH,
-                prefix_padding_ms=20,
+                # A little more onset padding pairs well with LOW sensitivity so the
+                # first phoneme isn't clipped once real speech is detected.
+                prefix_padding_ms=80,
                 silence_duration_ms=100,
             ),
             activity_handling=types.ActivityHandling.START_OF_ACTIVITY_INTERRUPTS,
@@ -429,6 +464,8 @@ async def tata_stream(ws: WebSocket):
     recorder = CallRecorder(None)
     # Accumulates Gemini token usage across reconnects for the cost estimate.
     usage = UsageTracker()
+    # Meters audio seconds each way for per-minute Gemini pricing.
+    audio = AudioMeter(input_rate=INPUT_SAMPLE_RATE, output_rate=OUTPUT_SAMPLE_RATE)
     transfer_state = {"active": False}
     # True once the caller hung up / the WS dropped — TATA has already torn the
     # leg down, so we must NOT issue a (billable, pointless) active hangup.
@@ -496,6 +533,12 @@ async def tata_stream(ws: WebSocket):
                     direction = "inbound"
                     phone_number = caller_number
 
+                # Outbound calls can land on a voicemail/answering machine — tell the
+                # agent not to pitch a recording (the heuristic backstop below also
+                # force-hangs-up if the opening turns out to be an automated greeting).
+                if direction == "outbound" and VOICEMAIL_DETECT:
+                    call_prompt = call_prompt + VOICEMAIL_PROMPT
+
                 call_tools   = await build_gemini_tools(call_tool_ids, call_kb_ids)
                 # Does this agent have the availability tool? Only then do we enforce
                 # "check availability before transfer" — agents without it transfer as before.
@@ -532,6 +575,10 @@ async def tata_stream(ws: WebSocket):
     model_unavailable = {"v": False}
     # True once the agent invokes the end_call tool → AGENT_ENDED.
     agent_ended = {"v": False}
+    # True once we decide the outbound call reached a voicemail / machine → VOICEMAIL.
+    voicemail_detected = {"v": False}
+    # Rolling buffer of the OPENING caller transcript, scanned for voicemail phrases.
+    vm_state = {"buf": "", "active": True}
     reconnect_count = 0
     # Consecutive Gemini server errors (503 high-demand / UNAVAILABLE) with no
     # productive session in between. Reset whenever a session yields audio, so a
@@ -598,6 +645,7 @@ async def tata_stream(ws: WebSocket):
                                 mulaw = base64.b64decode(payload)
                                 pcm16k, in_state = _mulaw8k_to_pcm16k(mulaw, in_state)
                                 recorder.add_caller(pcm16k, INPUT_SAMPLE_RATE)
+                                audio.add_input(pcm16k)
                                 try:
                                     await session.send_realtime_input(
                                         audio=types.Blob(data=pcm16k, mime_type=f"audio/pcm;rate={INPUT_SAMPLE_RATE}")
@@ -861,11 +909,27 @@ async def tata_stream(ws: WebSocket):
                                     if response.data and stream_sid:
                                         productive_box["hit"] = True
                                         recorder.add_agent(response.data, OUTPUT_SAMPLE_RATE)
+                                        audio.add_output(response.data)
                                         await _stop_filler()
                                         await _send_mixed(always_mixer.mix(response.data))
                                     if sc and sc.input_transcription and sc.input_transcription.text:
-                                        log.debug("👤 %s", sc.input_transcription.text)
-                                        await add_transcript(log_id, "user", sc.input_transcription.text)
+                                        _utext = sc.input_transcription.text
+                                        log.debug("👤 %s", _utext)
+                                        await add_transcript(log_id, "user", _utext)
+                                        # Voicemail backstop (outbound only): if the opening caller
+                                        # audio is an automated/voicemail/IVR greeting, hang up rather
+                                        # than talk to a machine. Only scans the first ~utterances.
+                                        if (VOICEMAIL_DETECT and direction == "outbound"
+                                                and vm_state["active"] and not voicemail_detected["v"]):
+                                            vm_state["buf"] = (vm_state["buf"] + " " + _utext).strip()[:VOICEMAIL_SCAN_CHARS]
+                                            if VOICEMAIL_RE.search(vm_state["buf"]):
+                                                log.info("📭 voicemail/IVR detected — hanging up: %r",
+                                                         vm_state["buf"][:160])
+                                                voicemail_detected["v"] = True
+                                                client_closed = True
+                                                return
+                                            if len(vm_state["buf"]) >= VOICEMAIL_SCAN_CHARS:
+                                                vm_state["active"] = False
                                     if sc and sc.output_transcription and sc.output_transcription.text:
                                         log.debug("🤖 %s", sc.output_transcription.text)
                                         await add_transcript(log_id, "model", sc.output_transcription.text)
@@ -1030,10 +1094,13 @@ async def tata_stream(ws: WebSocket):
             await end_call(log_id, status="error",
                            reason=classify_disconnect(fatal_exc),
                            error_message=fatal_error,
-                           input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)
+                           token_usage=usage.totals(),
+                           input_seconds=audio.input_seconds, output_seconds=audio.output_seconds)
         else:
             # Clean teardown: figure out WHY the call ended.
-            if agent_ended["v"]:
+            if voicemail_detected["v"]:
+                reason = REASON_VOICEMAIL            # outbound hit a machine → we hung up
+            elif agent_ended["v"]:
                 reason = REASON_AGENT_ENDED
             elif model_unavailable["v"]:
                 reason = REASON_MODEL_ERROR          # Gemini stayed down → notify customer
@@ -1046,7 +1113,8 @@ async def tata_stream(ws: WebSocket):
             status = "error" if reason == REASON_MODEL_ERROR else "ended"
             await end_call(log_id, status=status, reason=reason,
                            api_key=GOOGLE_API_KEY or None,
-                           input_tokens=usage.input_tokens, output_tokens=usage.output_tokens)
+                           token_usage=usage.totals(),
+                           input_seconds=audio.input_seconds, output_seconds=audio.output_seconds)
         log.info(
             "📞 CALL ENDED (log_id=%s, call=%s) | by_caller=%s transferred=%s agent_ended=%s%s",
             log_id, tata_call_sid, ended_by_caller["v"], transfer_state["active"],

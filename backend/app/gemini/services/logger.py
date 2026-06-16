@@ -24,6 +24,7 @@ SUMMARY_MODEL = os.environ.get("GEMINI_SUMMARY_MODEL", "gemini-2.5-flash")
 REASON_COMPLETED          = "COMPLETED"            # call finished normally
 REASON_CLIENT_DISCONNECTED = "CLIENT_DISCONNECTED"  # caller/browser hung up
 REASON_AGENT_ENDED        = "AGENT_ENDED"          # AI agent ended the call
+REASON_VOICEMAIL          = "VOICEMAIL"            # outbound hit a voicemail / answering machine / IVR
 REASON_NETWORK_ISSUE      = "NETWORK_ISSUE"        # socket drop / connection reset / timeout
 REASON_MODEL_ERROR        = "MODEL_ERROR"          # Gemini 5xx / unavailable / overloaded
 REASON_INTERNAL_ERROR     = "INTERNAL_ERROR"       # anything else
@@ -182,8 +183,9 @@ async def end_call(
     reason: Optional[str] = None,
     error_message: Optional[str] = None,
     api_key: Optional[str] = None,
-    input_tokens: Optional[int] = None,
-    output_tokens: Optional[int] = None,
+    token_usage: Optional[dict] = None,
+    input_seconds: Optional[float] = None,
+    output_seconds: Optional[float] = None,
 ) -> None:
     if not call_id:
         return
@@ -209,14 +211,15 @@ async def end_call(
                 row.duration_s = max(0, int((ended - started).total_seconds()))
             # Estimated cost: Gemini token usage + telephony minutes. Duration is
             # now known, so telephony can be priced here too. Best-effort.
-            if input_tokens is not None or output_tokens is not None:
+            if token_usage is not None:
                 try:
                     from .pricing import estimate_cost
                     from ...routes.fx_route import get_usd_inr_rate
                     breakdown = estimate_cost(
                         call_type=row.call_type,
-                        input_tokens=input_tokens,
-                        output_tokens=output_tokens,
+                        token_usage=token_usage,
+                        input_seconds=input_seconds,
+                        output_seconds=output_seconds,
                         duration_s=row.duration_s,
                         usd_inr_rate=await get_usd_inr_rate(),
                     )

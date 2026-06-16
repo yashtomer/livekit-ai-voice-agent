@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { useQuery } from '@tanstack/react-query'
 import api from '../api/client'
 import { Device, Call } from '@twilio/voice-sdk'
-import { Phone, PhoneOff, Mic, MicOff, ChevronDown, Settings, Home, ListVideo, Eye, X, RefreshCw, Play, Loader2, Mic2, FileCode, ArrowRight, Globe, Cloud, Server, Cpu, PhoneCall, Wrench, Bot, Plus, Pencil, Trash2, Star, Lock, Webhook, FlaskConical, IndianRupee, Volume2, VolumeX, ArrowLeft, Music, BookOpen, FileText, Upload, Search, Database, BarChart3, Clock, TrendingUp, AlertTriangle, Sparkles, Variable, Braces, Info, CalendarDays, ChevronLeft, ChevronRight, CheckCircle2, Stethoscope, User } from 'lucide-react'
+import { Phone, PhoneOff, Mic, MicOff, ChevronDown, Settings, Home, ListVideo, Eye, X, RefreshCw, Play, Loader2, Mic2, FileCode, ArrowRight, Globe, Cloud, Server, Cpu, PhoneCall, Wrench, Bot, Plus, Pencil, Trash2, Star, Lock, Webhook, FlaskConical, IndianRupee, Volume2, VolumeX, ArrowLeft, Music, BookOpen, FileText, Upload, Search, Database, BarChart3, Clock, TrendingUp, AlertTriangle, Sparkles, Variable, Braces, Info, CalendarDays, ChevronLeft, ChevronRight, CheckCircle2, Stethoscope, User, Download } from 'lucide-react'
 import Layout from '../components/Layout'
 import useGeminiVoice, { type GeminiStatus } from '../hooks/useGeminiVoice'
 import GeminiAvatar, { AVATARS, DEFAULT_AVATAR_URL, CAMERA_VIEWS, DEFAULT_CAMERA_VIEW, type CameraView } from '../components/GeminiAvatar'
@@ -231,12 +231,14 @@ function useAgentTemplates(fallback: AgentTemplate[]): AgentTemplate[] {
 
 const CALL_TYPE_LABEL: Record<string, string> = {
   browser: 'Browser Voice',
+  tata:    'TATA Smartflo',
   twilio:  'Twilio Bridge',
   vobiz:   'Vobiz',
 }
 
 const CALL_TYPE_BADGE: Record<string, string> = {
   browser: 'bg-blue-500/10 text-blue-600 dark:text-blue-400 border-blue-500/20',
+  tata:    'bg-orange-500/10 text-orange-600 dark:text-orange-400 border-orange-500/20',
   twilio:  'bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20',
   vobiz:   'bg-green-500/10 text-green-600 dark:text-green-400 border-green-500/20',
 }
@@ -1144,6 +1146,12 @@ type CallUsage = {
   input_tokens: number
   output_tokens: number
   total_tokens: number
+  audio_in_tokens: number
+  text_in_tokens: number
+  audio_out_tokens: number
+  text_out_tokens: number
+  input_audio_min: number
+  output_audio_min: number
   telephony_min: number
   usd_inr_rate: number
   gemini_usd: number
@@ -1756,15 +1764,17 @@ function CallsView() {
                         </div>
                       )}
                       <div className="flex flex-col">
-                        <span className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground">Tokens in</span>
-                        <span className="text-xs text-foreground tabular-nums">{selected.usage.input_tokens.toLocaleString()}</span>
+                        <span className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground">Audio in</span>
+                        <span className="text-xs text-foreground tabular-nums">{selected.usage.input_audio_min ?? 0} min</span>
                       </div>
                       <div className="flex flex-col">
-                        <span className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground">Tokens out</span>
-                        <span className="text-xs text-foreground tabular-nums">{selected.usage.output_tokens.toLocaleString()}</span>
+                        <span className="text-[10px] uppercase tracking-wide font-semibold text-muted-foreground">Audio out</span>
+                        <span className="text-xs text-foreground tabular-nums">{selected.usage.output_audio_min ?? 0} min</span>
                       </div>
                     </div>
-                    <p className="text-[10px] text-muted-foreground/70 mt-2">Estimate — Gemini audio tokens + telephony minutes at configured rates (₹{selected.usage.usd_inr_rate}/$).</p>
+                    <p className="text-[10px] text-muted-foreground/70 mt-2">
+                      Estimate — Gemini priced by modality: audio {(selected.usage.audio_in_tokens ?? 0).toLocaleString()} in / {(selected.usage.audio_out_tokens ?? 0).toLocaleString()} out ($3 / $12 per 1M), text {(selected.usage.text_in_tokens ?? 0).toLocaleString()} in / {(selected.usage.text_out_tokens ?? 0).toLocaleString()} out ($0.75 / $4.50 per 1M — prompt, KB &amp; tools) + telephony. ₹{selected.usage.usd_inr_rate}/$.
+                    </p>
                   </div>
                 )}
 
@@ -2044,6 +2054,362 @@ function SpecSection({
   )
 }
 
+// ── End-to-end call-flow diagram (data-driven SVG) ───────────────────────────
+// Covers every use case: Browser, TATA inbound, TATA outbound → one Gemini Live
+// session → tools / transfer / off-topic / end_call → post-call. Edit the NODES
+// and EDGES arrays to change the diagram.
+
+type FlowCls = 'entry' | 'carrier' | 'backend' | 'gemini' | 'tool' | 'external' | 'datastore' | 'decision' | 'terminal' | 'good'
+type FlowShape = 'round' | 'diamond' | 'cyl'
+type FlowNodeDef = { id: string; x: number; y: number; w: number; h?: number; cls: FlowCls; shape: FlowShape; title: string; sub: string }
+type FlowEdgeOpt = { label?: string; dash?: boolean; fs?: 'top' | 'bottom' | 'left' | 'right'; ts?: 'top' | 'bottom' | 'left' | 'right'; viaX?: number }
+type FlowEdgeDef = [string, string, FlowEdgeOpt?]
+
+const FLOW_W = 1580, FLOW_H = 2680
+
+const FLOW_CLS: Record<FlowCls, { fill: string; stroke: string }> = {
+  entry:    { fill: '#eef2f7', stroke: '#44607f' },
+  carrier:  { fill: '#fde9d9', stroke: '#e08a3b' },
+  backend:  { fill: '#daecf6', stroke: '#3b96cf' },
+  gemini:   { fill: '#e9ddf6', stroke: '#8a63c9' },
+  tool:     { fill: '#dff0df', stroke: '#4caf50' },
+  external: { fill: '#d8f1ed', stroke: '#23a596' },
+  datastore:{ fill: '#e6e9ef', stroke: '#6b7a99' },
+  decision: { fill: '#fdf3d0', stroke: '#dca91d' },
+  terminal: { fill: '#fbdede', stroke: '#d65a5a' },
+  good:     { fill: '#dff0df', stroke: '#3a9d5d' },
+}
+
+const FLOW_LANES = [
+  { label: 'CONNECT',   y0: 100,  y1: 912,  fill: '#fef6f3' },
+  { label: 'CONVERSE',  y0: 912,  y1: 1652, fill: '#f4f9fb' },
+  { label: 'RESOLVE',   y0: 1652, y1: 2212, fill: '#fbf9f1' },
+  { label: 'POST-CALL', y0: 2212, y1: 2648, fill: '#f3f9f4' },
+]
+
+const FLOW_NODES: FlowNodeDef[] = [
+  { id: 'browser', x: 250,  y: 152, w: 200, cls: 'entry', shape: 'round', title: '📱 Browser Voice', sub: 'User clicks “Start”' },
+  { id: 'tin',     x: 660,  y: 152, w: 200, cls: 'entry', shape: 'round', title: '📞 TATA Inbound', sub: 'Caller dials the DID' },
+  { id: 'tout',    x: 1030, y: 152, w: 210, cls: 'entry', shape: 'round', title: '📲 TATA Outbound', sub: 'POST /api/tata/call' },
+
+  { id: 'b_ws',  x: 250, y: 252, w: 210, cls: 'backend',  shape: 'round', title: 'WS /api/gemini/ws', sub: '?token = JWT' },
+  { id: 'b_key', x: 250, y: 350, w: 230, cls: 'backend',  shape: 'round', title: '_resolve_api_key', sub: 'JWT → user Google key (admin → server key)' },
+  { id: 'b_dec', x: 250, y: 462, w: 210, h: 96, cls: 'decision', shape: 'diamond', title: 'API key present?', sub: '' },
+  { id: 'b_term',x: 72,  y: 462, w: 150, cls: 'terminal', shape: 'round', title: 'Close WS', sub: 'code: no_api_key' },
+  { id: 'b_cfg', x: 250, y: 585, w: 230, cls: 'backend',  shape: 'round', title: 'Receive config msg', sub: 'prompt · voice · tools · KB · ambient' },
+
+  { id: 'to_store', x: 1030, y: 252, w: 230, cls: 'backend', shape: 'round', title: 'Store CALL_CONFIGS[dest #]', sub: 'per-call cfg · 1h TTL' },
+  { id: 'to_ctc',   x: 1030, y: 350, w: 230, cls: 'carrier', shape: 'round', title: 'TATA Click-to-Call API', sub: 'rings agent DID + dials customer' },
+  { id: 'to_ans',   x: 1030, y: 462, w: 230, cls: 'carrier', shape: 'round', title: 'Customer answers', sub: 'TATA streams to /stream' },
+
+  { id: 'ti_ws',    x: 660, y: 252, w: 210, cls: 'carrier', shape: 'round', title: 'TATA opens WS', sub: '/api/tata/stream' },
+  { id: 'ts_start', x: 660, y: 350, w: 240, cls: 'backend', shape: 'round', title: 'Wait for “start” event', sub: 'streamSid·callSid·from·to  (no server key → close)' },
+  { id: 'ts_dec',   x: 660, y: 468, w: 240, h: 104, cls: 'decision', shape: 'diamond', title: 'Outbound cfg matched by number?', sub: '' },
+  { id: 'ts_out',   x: 470, y: 585, w: 200, cls: 'backend', shape: 'round', title: 'Outbound', sub: 'use CALL_CONFIGS cfg' },
+  { id: 'ts_in',    x: 830, y: 585, w: 220, cls: 'backend', shape: 'round', title: 'Inbound', sub: 'get_default_phone_agent (env fallback)' },
+
+  { id: 'm_build',   x: 560, y: 690, w: 240, cls: 'backend', shape: 'round', title: 'build_gemini_tools', sub: '+ detect availability tool' },
+  { id: 'm_amb',     x: 560, y: 782, w: 240, cls: 'backend', shape: 'round', title: 'AmbientMixer setup', sub: 'always + tool-call loops' },
+  { id: 'm_log',     x: 560, y: 872, w: 240, cls: 'backend', shape: 'round', title: 'start_call', sub: 'create gemini_call_logs row' },
+  { id: 'm_session', x: 560, y: 972, w: 260, cls: 'gemini',  shape: 'round', title: 'Open Gemini Live session', sub: 'voice · language · prompt · tools' },
+
+  { id: 'ds_pg', x: 1380, y: 910, w: 180, h: 140, cls: 'datastore', shape: 'cyl', title: 'Postgres + pgvector', sub: 'call logs · agents · tools · KB' },
+
+  { id: 'c_greet', x: 560, y: 1072, w: 280, cls: 'gemini',  shape: 'round', title: 'Greeting / first_message', sub: 'inbound·browser: now  ·  outbound: on 1st caller audio' },
+  { id: 'c_pumps', x: 560, y: 1168, w: 300, cls: 'backend', shape: 'round', title: 'Two-way audio streams', sub: 'mic/μ-law → PCM16 16k  ·  24k → mix ambient → out' },
+  { id: 'c_trans', x: 560, y: 1262, w: 280, cls: 'backend', shape: 'round', title: 'Transcribe both ways', sub: 'add_transcript · barge-in flush (clear)' },
+  { id: 'c_dec',   x: 560, y: 1372, w: 230, h: 100, cls: 'decision', shape: 'diamond', title: 'Gemini fires tool_call?', sub: '' },
+  { id: 't_disp',  x: 560, y: 1482, w: 260, cls: 'backend', shape: 'round', title: 'dispatch_tool_call', sub: '+ ambient filler (typing / clicks)' },
+  { id: 't_resp',  x: 560, y: 1582, w: 240, cls: 'backend', shape: 'round', title: 'send_tool_response', sub: 'Gemini continues the turn' },
+
+  { id: 't_kb',     x: 1150, y: 1300, w: 250, cls: 'tool',     shape: 'round', title: 'search_knowledge_base', sub: 'pgvector top-k chunks' },
+  { id: 't_http',   x: 1150, y: 1392, w: 250, cls: 'tool',     shape: 'round', title: 'DB tool with URL', sub: 'HTTP API call (GET / POST)' },
+  { id: 't_builtin',x: 1150, y: 1484, w: 250, cls: 'tool',     shape: 'round', title: 'Builtin tools', sub: 'doctors · book_appointment · book_calendar_event' },
+  { id: 't_avail',  x: 1150, y: 1576, w: 250, cls: 'tool',     shape: 'round', title: 'check_agent_availability', sub: 'returns transfer_number / available' },
+  { id: 't_cal',    x: 1420, y: 1484, w: 150, cls: 'external', shape: 'round', title: 'Google Calendar', sub: 'create event' },
+
+  { id: 'ra1',     x: 290, y: 1706, w: 200, h: 96, cls: 'decision', shape: 'diamond', title: 'transfer_call', sub: '' },
+  { id: 'raB',     x: 92,  y: 1818, w: 170, cls: 'terminal', shape: 'round', title: 'Browser', sub: 'unavailable → offer callback' },
+  { id: 'raChk',   x: 290, y: 1818, w: 220, cls: 'backend',  shape: 'round', title: 'Phone: enforce', sub: 'check_agent_availability first' },
+  { id: 'raAv',    x: 290, y: 1928, w: 200, h: 96, cls: 'decision', shape: 'diamond', title: 'Human agent free?', sub: '' },
+  { id: 'raYes',   x: 210, y: 2042, w: 240, cls: 'carrier',  shape: 'round', title: 'Hand-off line → transfer', sub: 'TATA Call Options API (type 4, intercom)' },
+  { id: 'raBridge',x: 210, y: 2146, w: 240, cls: 'carrier',  shape: 'round', title: 'Bridge to human', sub: 'hold WS open until “stop”' },
+  { id: 'raNo',    x: 480, y: 2042, w: 210, cls: 'external', shape: 'round', title: 'No agent', sub: 'promise callback → WhatsApp → end' },
+
+  { id: 'rb1',   x: 680, y: 1706, w: 250, cls: 'backend',  shape: 'round', title: 'report_off_topic', sub: 'strike n / threshold (survives reconnect)' },
+  { id: 'rbDec', x: 680, y: 1818, w: 210, h: 96, cls: 'decision', shape: 'diamond', title: 'strikes ≥ threshold?', sub: '' },
+  { id: 'rbNo',  x: 680, y: 1928, w: 230, cls: 'backend',  shape: 'round', title: 'Redirect to in-scope', sub: '→ continue conversation' },
+  { id: 'rbYes', x: 680, y: 2042, w: 250, cls: 'backend',  shape: 'round', title: 'Escalate', sub: 'browser → end · phone → transfer senior rep' },
+
+  { id: 'rc1', x: 1000, y: 1706, w: 200, cls: 'backend',  shape: 'round', title: 'end_call invoked', sub: '' },
+  { id: 'rc2', x: 1000, y: 1808, w: 200, cls: 'gemini',   shape: 'round', title: 'Agent speaks', sub: 'closing line' },
+  { id: 'rc3', x: 1000, y: 1918, w: 230, cls: 'terminal', shape: 'round', title: 'turn_complete → tear down', sub: 'reason = AGENT_ENDED' },
+
+  { id: 'rk1', x: 1350, y: 1748, w: 250, cls: 'backend',  shape: 'round', title: 'Gemini drop 1006 / 1011', sub: 'silent reconnect · caller stays on' },
+  { id: 'rk2', x: 1350, y: 1868, w: 250, cls: 'terminal', shape: 'round', title: '503 streak > 6', sub: 'MODEL_ERROR → end call' },
+
+  { id: 'p_end',    x: 680, y: 2278, w: 320, cls: 'backend',  shape: 'round', title: 'end_call(reason) — finalize log', sub: 'AGENT_ENDED · CLIENT_DISCONNECTED · MODEL_ERROR · COMPLETED' },
+  { id: 'p_hangup', x: 320, y: 2278, w: 220, cls: 'carrier',  shape: 'round', title: 'TATA active hangup', sub: 'if we ended & caller still on' },
+  { id: 'p_wa',     x: 1040,y: 2278, w: 230, cls: 'external', shape: 'round', title: 'WhatsApp callback', sub: 'on MODEL_ERROR / no-agent' },
+  { id: 'p_rec',    x: 680, y: 2382, w: 240, cls: 'backend',  shape: 'round', title: 'Save recording WAV', sub: 'set_recording' },
+  { id: 'p_price',  x: 680, y: 2476, w: 260, cls: 'backend',  shape: 'round', title: 'Usage totals', sub: 'tokens + audio seconds → pricing' },
+  { id: 'p_done',   x: 680, y: 2580, w: 300, cls: 'good',     shape: 'round', title: 'Call saved', sub: 'Calls page: transcript · recording · cost' },
+]
+
+const FLOW_EDGES: FlowEdgeDef[] = [
+  ['browser', 'b_ws'], ['b_ws', 'b_key'], ['b_key', 'b_dec'],
+  ['b_dec', 'b_term', { label: 'no key', fs: 'left', ts: 'top' }],
+  ['b_dec', 'b_cfg', { label: 'key ok' }],
+
+  ['tin', 'ti_ws'], ['ti_ws', 'ts_start'],
+  ['tout', 'to_store'], ['to_store', 'to_ctc'], ['to_ctc', 'to_ans'],
+  ['to_ans', 'ts_start', { fs: 'bottom', ts: 'right' }],
+  ['ts_start', 'ts_dec'],
+  ['ts_dec', 'ts_out', { label: 'yes (outbound)', fs: 'left', ts: 'top' }],
+  ['ts_dec', 'ts_in', { label: 'no (inbound)', fs: 'right', ts: 'top' }],
+
+  ['b_cfg', 'm_build', { fs: 'bottom', ts: 'left' }],
+  ['ts_out', 'm_build', { fs: 'bottom', ts: 'top' }],
+  ['ts_in', 'm_build', { fs: 'bottom', ts: 'right' }],
+  ['m_build', 'm_amb'], ['m_amb', 'm_log'], ['m_log', 'm_session'],
+  ['m_log', 'ds_pg', { dash: true, fs: 'right', ts: 'left', label: 'write' }],
+
+  ['m_session', 'c_greet'], ['c_greet', 'c_pumps'], ['c_pumps', 'c_trans'], ['c_trans', 'c_dec'],
+  ['c_trans', 'ds_pg', { dash: true, fs: 'right', ts: 'left', label: 'transcripts' }],
+  ['c_dec', 't_disp', { label: 'tool_call' }],
+  ['c_dec', 'c_pumps', { dash: true, fs: 'right', ts: 'right', viaX: 1505, label: 'no · keep talking' }],
+
+  ['t_disp', 't_kb', { dash: true, fs: 'right', ts: 'left' }],
+  ['t_disp', 't_http', { dash: true, fs: 'right', ts: 'left' }],
+  ['t_disp', 't_builtin', { dash: true, fs: 'right', ts: 'left' }],
+  ['t_disp', 't_avail', { dash: true, fs: 'right', ts: 'left' }],
+  ['t_builtin', 't_cal', { dash: true, fs: 'right', ts: 'left' }],
+  ['t_kb', 'ds_pg', { dash: true, fs: 'top', ts: 'bottom', label: 'pgvector' }],
+  ['t_disp', 't_resp'],
+  ['t_resp', 'c_pumps', { dash: true, fs: 'right', ts: 'right', viaX: 1525, label: 'continue' }],
+
+  ['t_disp', 'ra1', { dash: true, fs: 'left', ts: 'top', label: 'transfer_call' }],
+  ['t_disp', 'rb1', { dash: true, fs: 'bottom', ts: 'top', label: 'report_off_topic' }],
+  ['t_disp', 'rc1', { dash: true, fs: 'right', ts: 'top', label: 'end_call' }],
+  ['c_pumps', 'rk1', { dash: true, fs: 'right', ts: 'top', label: 'on Gemini drop' }],
+
+  ['ra1', 'raB', { label: 'browser', fs: 'left', ts: 'top' }],
+  ['ra1', 'raChk', { label: 'phone' }],
+  ['raChk', 'raAv'],
+  ['raAv', 'raYes', { label: 'yes' }],
+  ['raYes', 'raBridge'],
+  ['raAv', 'raNo', { label: 'no', fs: 'right', ts: 'top' }],
+
+  ['rb1', 'rbDec'],
+  ['rbDec', 'rbNo', { label: 'no', fs: 'left', ts: 'top' }],
+  ['rbDec', 'rbYes', { label: 'yes', fs: 'right', ts: 'top' }],
+  ['rbNo', 'c_pumps', { dash: true, fs: 'right', ts: 'right', viaX: 1545, label: 'redirect' }],
+
+  ['rc1', 'rc2'], ['rc2', 'rc3'],
+
+  ['rc3', 'p_end', { fs: 'bottom', ts: 'right' }],
+  ['raBridge', 'p_end', { fs: 'bottom', ts: 'left' }],
+  ['raNo', 'p_end', { fs: 'bottom', ts: 'left' }],
+  ['rbYes', 'p_end', { fs: 'bottom', ts: 'top' }],
+  ['rk2', 'p_end', { fs: 'bottom', ts: 'right' }],
+
+  ['p_end', 'p_hangup', { fs: 'left', ts: 'top' }],
+  ['p_end', 'p_wa', { fs: 'right', ts: 'top' }],
+  ['p_end', 'p_rec'],
+  ['p_rec', 'p_price'],
+  ['p_price', 'p_done'],
+]
+
+function FullCallFlowDiagram() {
+  const ref = useRef<SVGSVGElement | null>(null)
+  const [downloading, setDownloading] = useState(false)
+
+  // Export the live SVG to a hi-res PNG (always in sync with the diagram).
+  const downloadPng = useCallback(() => {
+    const svg = ref.current
+    if (!svg) return
+    setDownloading(true)
+    const clone = svg.cloneNode(true) as SVGSVGElement
+    clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg')
+    const xml = new XMLSerializer().serializeToString(clone)
+    const svgUrl = URL.createObjectURL(new Blob([xml], { type: 'image/svg+xml;charset=utf-8' }))
+    const img = new Image()
+    img.onload = () => {
+      const scale = 2 // 2× for crisp text
+      const canvas = document.createElement('canvas')
+      canvas.width = FLOW_W * scale
+      canvas.height = FLOW_H * scale
+      const ctx = canvas.getContext('2d')
+      if (!ctx) { URL.revokeObjectURL(svgUrl); setDownloading(false); return }
+      ctx.scale(scale, scale)
+      ctx.fillStyle = '#ffffff'
+      ctx.fillRect(0, 0, FLOW_W, FLOW_H)
+      ctx.drawImage(img, 0, 0, FLOW_W, FLOW_H)
+      URL.revokeObjectURL(svgUrl)
+      canvas.toBlob(blob => {
+        if (blob) {
+          const a = document.createElement('a')
+          a.href = URL.createObjectURL(blob)
+          a.download = 'gemini_call_flow.png'
+          a.click()
+          URL.revokeObjectURL(a.href)
+        }
+        setDownloading(false)
+      }, 'image/png')
+    }
+    img.onerror = () => { URL.revokeObjectURL(svgUrl); setDownloading(false) }
+    img.src = svgUrl
+  }, [])
+
+  useEffect(() => {
+    const svg = ref.current
+    if (!svg) return
+    const NS = 'http://www.w3.org/2000/svg'
+    while (svg.firstChild) svg.removeChild(svg.firstChild)
+
+    const el = (tag: string, attrs: Record<string, string | number>, parent?: Element) => {
+      const e = document.createElementNS(NS, tag)
+      for (const k in attrs) e.setAttribute(k, String(attrs[k]))
+      ;(parent || svg).appendChild(e)
+      return e
+    }
+
+    // arrow markers
+    const d = el('defs', {})
+    const mk = (id: string, fill: string) => {
+      const m = el('marker', { id, viewBox: '0 0 10 10', refX: 9, refY: 5, markerWidth: 7, markerHeight: 7, orient: 'auto-start-reverse' }, d)
+      el('path', { d: 'M0,0 L10,5 L0,10 z', fill }, m)
+    }
+    mk('flow-arrow', '#5a6b7b'); mk('flow-arrowd', '#9aa7b4')
+
+    // lane bands + labels
+    FLOW_LANES.forEach(L => {
+      el('rect', { x: 8, y: L.y0, width: FLOW_W - 16, height: L.y1 - L.y0, fill: L.fill, stroke: '#ececec', 'stroke-width': 1, rx: 6 })
+      el('rect', { x: 8, y: L.y0, width: 30, height: L.y1 - L.y0, fill: '#ffffff', opacity: 0.45 })
+      const cy = (L.y0 + L.y1) / 2
+      const t = el('text', { x: 24, y: cy, 'text-anchor': 'middle', 'font-weight': 800, 'letter-spacing': 3, fill: '#b23a3a', 'font-size': 15, transform: `rotate(-90 24 ${cy})` })
+      t.textContent = L.label
+    })
+
+    // legend
+    const lx = 1170, ly = 96, lw = 400, rowH = 20
+    const items: [FlowCls, string][] = [
+      ['carrier', 'Telephony carrier (TATA)'], ['backend', 'Our backend (FastAPI)'],
+      ['gemini', 'Gemini Live agent'], ['tool', 'Agent tool → backend'],
+      ['external', 'External service'], ['datastore', 'Data store (Postgres)'],
+      ['decision', 'Decision'], ['terminal', 'Terminal / critical'],
+    ]
+    const rows = Math.ceil(items.length / 2)
+    el('rect', { x: lx, y: ly, width: lw, height: rows * rowH + 30, rx: 8, fill: '#ffffff', stroke: '#d7dde3' })
+    const lt = el('text', { x: lx + 12, y: ly + 18, 'font-size': 12, 'font-weight': 700, fill: '#333' }); lt.textContent = 'Legend'
+    items.forEach((it, i) => {
+      const col = i % 2, row = Math.floor(i / 2)
+      const x = lx + 12 + col * 195, y = ly + 30 + row * rowH
+      const c = FLOW_CLS[it[0]]
+      el('rect', { x, y: y - 9, width: 16, height: 12, rx: 3, fill: c.fill, stroke: c.stroke })
+      const tx = el('text', { x: x + 22, y, 'font-size': 11.5, fill: '#333' }); tx.textContent = it[1]
+    })
+    const ny = ly + 30 + rows * rowH
+    el('line', { x1: lx + 12, y1: ny - 4, x2: lx + 40, y2: ny - 4, stroke: '#9aa7b4', 'stroke-width': 2, 'stroke-dasharray': '5 4' })
+    const dn = el('text', { x: lx + 46, y: ny, 'font-size': 11.5, fill: '#333' }); dn.textContent = 'Dashed = tool / DB / API call · loop-back'
+
+    const byId: Record<string, FlowNodeDef> = {}
+    FLOW_NODES.forEach(n => { n.h = n.h || 60; byId[n.id] = n })
+
+    type Pt = { x: number; y: number }
+    const anchor = (n: FlowNodeDef, side: string): Pt => {
+      const { x, y, w } = n, h = n.h || 60
+      if (side === 'top') return { x, y: y - h / 2 }
+      if (side === 'bottom') return { x, y: y + h / 2 }
+      if (side === 'left') return { x: x - w / 2, y }
+      return { x: x + w / 2, y }
+    }
+    const isV = (s: string) => s === 'top' || s === 'bottom'
+    const route = (p0: Pt, p1: Pt, fs: string, ts: string, viaX?: number): Pt[] => {
+      if (viaX !== undefined) return [p0, { x: viaX, y: p0.y }, { x: viaX, y: p1.y }, p1]
+      if (isV(fs) && isV(ts)) { const my = (p0.y + p1.y) / 2; return [p0, { x: p0.x, y: my }, { x: p1.x, y: my }, p1] }
+      if (!isV(fs) && !isV(ts)) { const mx = (p0.x + p1.x) / 2; return [p0, { x: mx, y: p0.y }, { x: mx, y: p1.y }, p1] }
+      if (!isV(fs) && isV(ts)) return [p0, { x: p1.x, y: p0.y }, p1]
+      return [p0, { x: p0.x, y: p1.y }, p1]
+    }
+
+    // edges (under nodes)
+    const edgeLayer = el('g', {})
+    FLOW_EDGES.forEach(([from, to, opt]) => {
+      const o = opt || {}
+      const a = byId[from], b = byId[to]
+      if (!a || !b) return
+      const fs = o.fs || 'bottom', ts = o.ts || 'top'
+      const pts = route(anchor(a, fs), anchor(b, ts), fs, ts, o.viaX)
+      const path = 'M' + pts.map(p => `${p.x},${p.y}`).join(' L')
+      el('path', {
+        d: path, fill: 'none', stroke: o.dash ? '#9aa7b4' : '#5a6b7b', 'stroke-width': o.dash ? 1.6 : 1.8,
+        'stroke-dasharray': o.dash ? '5 4' : 'none', 'marker-end': o.dash ? 'url(#flow-arrowd)' : 'url(#flow-arrow)',
+      }, edgeLayer)
+      if (o.label) {
+        let best = 0, bx = pts[0].x, by = pts[0].y
+        for (let i = 0; i < pts.length - 1; i++) {
+          const len = Math.hypot(pts[i + 1].x - pts[i].x, pts[i + 1].y - pts[i].y)
+          if (len > best) { best = len; bx = (pts[i].x + pts[i + 1].x) / 2; by = (pts[i].y + pts[i + 1].y) / 2 }
+        }
+        const tw = o.label.length * 6.0 + 8
+        el('rect', { x: bx - tw / 2, y: by - 9, width: tw, height: 16, rx: 3, fill: '#ffffff', opacity: 0.92 }, edgeLayer)
+        const t = el('text', { x: bx, y: by + 3, 'text-anchor': 'middle', 'font-size': 10.5, 'font-weight': 600, fill: '#444' }, edgeLayer)
+        t.textContent = o.label
+      }
+    })
+
+    const wrap = (txt: string, maxChars: number): string[] => {
+      const words = txt.split(' '), lines: string[] = []; let cur = ''
+      words.forEach(w => {
+        if ((cur + ' ' + w).trim().length > maxChars) { if (cur) lines.push(cur); cur = w }
+        else cur = (cur + ' ' + w).trim()
+      })
+      if (cur) lines.push(cur)
+      return lines
+    }
+
+    // nodes
+    FLOW_NODES.forEach(n => {
+      const c = FLOW_CLS[n.cls], { x, y, w } = n, h = n.h || 60
+      const g = el('g', {})
+      if (n.shape === 'diamond') {
+        el('polygon', { points: `${x},${y - h / 2} ${x + w / 2},${y} ${x},${y + h / 2} ${x - w / 2},${y}`, fill: c.fill, stroke: c.stroke, 'stroke-width': 1.6 }, g)
+      } else if (n.shape === 'cyl') {
+        const rx = w / 2, ry = 12, top = y - h / 2, bot = y + h / 2
+        el('path', { d: `M ${x - rx},${top + ry} a ${rx},${ry} 0 0 1 ${2 * rx},0 L ${x + rx},${bot - ry} a ${rx},${ry} 0 0 1 ${-2 * rx},0 Z`, fill: c.fill, stroke: c.stroke, 'stroke-width': 1.6 }, g)
+        el('path', { d: `M ${x - rx},${top + ry} a ${rx},${ry} 0 0 0 ${2 * rx},0`, fill: 'none', stroke: c.stroke, 'stroke-width': 1.6 }, g)
+      } else {
+        el('rect', { x: x - w / 2, y: y - h / 2, width: w, height: h, rx: 9, fill: c.fill, stroke: c.stroke, 'stroke-width': 1.6 }, g)
+      }
+      const titleLines = wrap(n.title, Math.max(10, Math.floor(w / 7.2)))
+      const subLines = n.sub ? wrap(n.sub, Math.floor(w / 5.6)) : []
+      const lineH = 14.5
+      let cy = y - ((titleLines.length + subLines.length) * lineH) / 2 + 11
+      titleLines.forEach(l => { const t = el('text', { x, y: cy, 'text-anchor': 'middle', 'font-size': 12.5, 'font-weight': 700, fill: '#1f2a36' }, g); t.textContent = l; cy += lineH })
+      subLines.forEach(l => { const t = el('text', { x, y: cy, 'text-anchor': 'middle', 'font-size': 10.8, fill: '#3c4858' }, g); t.textContent = l; cy += 13 })
+    })
+  }, [])
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex justify-end">
+        <button
+          onClick={downloadPng}
+          disabled={downloading}
+          className="inline-flex items-center gap-2 px-3 py-1.5 rounded-lg border border-border bg-card text-sm font-medium text-foreground hover:bg-muted/60 transition disabled:opacity-60 disabled:cursor-not-allowed"
+        >
+          {downloading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Download className="w-4 h-4" />}
+          {downloading ? 'Preparing…' : 'Download PNG'}
+        </button>
+      </div>
+      <div className="bg-white rounded-xl border border-border overflow-auto max-h-[80vh]">
+        <svg ref={ref} viewBox={`0 0 ${FLOW_W} ${FLOW_H}`} width={FLOW_W} height={FLOW_H} style={{ display: 'block', minWidth: FLOW_W }} />
+      </div>
+    </div>
+  )
+}
+
 function TechSpecsView() {
   return (
     <div className="flex-1 flex flex-col min-h-0 p-6 gap-6 overflow-y-auto">
@@ -2051,6 +2417,27 @@ function TechSpecsView() {
         <h1 className="text-xl font-bold text-foreground">Technical Architecture</h1>
         <p className="text-sm text-muted-foreground mt-0.5">
           How real-time voice flows from each entry point through Google's Gemini Live API and back.
+        </p>
+      </div>
+
+      {/* ── End-to-end call flow (all use cases) ── */}
+      <div className="card flex flex-col gap-4">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <h2 className="text-lg font-bold text-foreground">End-to-End Call Flow</h2>
+            <p className="text-sm text-muted-foreground mt-0.5">
+              Every use case in one map — Browser, TATA inbound &amp; outbound converge on a single Gemini Live
+              session, then branch through tools, transfer, off-topic, end-call, reconnect, and post-call.
+            </p>
+          </div>
+          <span className="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-bold border bg-orange-500/10 text-orange-600 dark:text-orange-400 border-orange-500/20">
+            OVERVIEW
+          </span>
+        </div>
+        <FullCallFlowDiagram />
+        <p className="text-[11px] text-muted-foreground">
+          One Gemini Live session per call · reconnect is transparent to the caller · ambient filler masks the
+          tool-call gap · scroll to pan the full diagram.
         </p>
       </div>
 
@@ -2091,97 +2478,95 @@ function TechSpecsView() {
         ]}
       />
 
-      {/* ── Twilio Phone Bridge ── */}
+      {/* ── TATA Inbound ── */}
       <SpecSection
-        title="Twilio Phone Bridge"
-        subtitle="Caller dials a Twilio number; Twilio streams audio to us; we relay to Gemini Live."
-        badge="TWILIO"
-        badgeColor="bg-purple-500/10 text-purple-600 dark:text-purple-400 border-purple-500/20"
+        title="TATA Inbound (Smartflo Voice Streaming)"
+        subtitle="Caller dials your TATA DID; TATA streams the call (Twilio-style JSON media protocol) to our static WS; we relay to Gemini Live."
+        badge="TATA · INBOUND"
+        badgeColor="bg-orange-500/10 text-orange-600 dark:text-orange-400 border-orange-500/20"
         diagram={
           <div className="flex flex-col items-center gap-6 min-w-fit">
             <div className="flex items-stretch justify-center flex-nowrap min-w-fit">
-              <FlowNode icon={PhoneCall} label="Caller" sub="PSTN phone" color="sky" />
+              <FlowNode icon={PhoneCall} label="Caller" sub="dials TATA DID" color="sky" />
               <FlowLink forward="→ μ-law 8 kHz (voice)" backward="← μ-law 8 kHz (response)" />
-              <FlowNode icon={Cloud} label="Twilio" sub="Media Streams" color="violet" />
-              <FlowLink forward="→ WebSocket μ-law 8k" backward="← media events μ-law 8k" />
-              <FlowNode icon={Server} label="FastAPI" sub="transcode + bridge" color="amber" />
+              <FlowNode icon={Cloud} label="TATA Smartflo" sub="Voice Streaming" color="amber" />
+              <FlowLink forward="→ WS media (μ-law 8k)" backward="← media frames (160 B μ-law)" />
+              <FlowNode icon={Server} label="FastAPI" sub="/api/tata/stream" color="violet" />
               <FlowLink forward="→ PCM16 @ 16 kHz" backward="← PCM16 @ 24 kHz" />
               <FlowNode icon={Cpu} label="Gemini Live" color="emerald" />
             </div>
             <div className="flex items-center gap-3 text-[11px] text-muted-foreground bg-muted/40 border border-dashed border-border rounded-lg px-3 py-2">
               <span className="font-bold uppercase tracking-wide text-foreground/70">Setup</span>
-              <span>1. Caller dials Twilio number</span>
+              <span>1. Paste <code className="font-mono">/api/tata/stream</code> in the TATA portal</span>
               <ArrowRight className="w-3.5 h-3.5" />
-              <span>2. Twilio POSTs <code className="font-mono">/api/twilio/voice</code></span>
+              <span>2. Assign that endpoint to your DID</span>
               <ArrowRight className="w-3.5 h-3.5" />
-              <span>3. We reply with TwiML <code className="font-mono">&lt;Stream&gt;</code></span>
+              <span>3. On call, TATA opens the WS &amp; sends <code className="font-mono">start</code></span>
             </div>
             <FlowBranch
-              label="tool_call ↕ on demand"
-              child={<FlowNode icon={Wrench} label="agent_tools.py" sub="get_doctors_by_department" color="rose" />}
+              label="default phone agent · tools ↕"
+              child={<FlowNode icon={Wrench} label="agent_tools + KB" sub="book / transfer / off-topic" color="rose" />}
             />
           </div>
         }
         steps={[
-          { title: 'Caller dials Twilio',  body: 'PSTN call hits a Twilio number provisioned in your TwiML App. Twilio HTTP-POSTs to our /api/twilio/voice with the call SID.' },
-          { title: 'Respond with TwiML',   body: 'Backend returns a TwiML <Connect><Stream url="wss://…/api/twilio/stream"/></Connect> response, instructing Twilio to open a bidirectional media-streams WebSocket.' },
-          { title: 'Audio transcoding',    body: 'Twilio Media Streams sends μ-law 8 kHz frames. We decode μ-law and resample to PCM16 @ 16 kHz before forwarding to Gemini. The reverse path resamples PCM16 24 kHz → μ-law 8 kHz.' },
-          { title: 'Reconnect handling',   body: 'When Gemini\'s preview model drops the session, we transparently reopen it while keeping Twilio\'s WebSocket alive — the caller hears only a brief pause.' },
-          { title: 'Tool dispatch',        body: 'Same agent_tools.py runs here as in browser mode. If Gemini asks for get_doctors_by_department, the backend resolves it inline and responds within the same session.' },
-          { title: 'Call logging',         body: 'Each call is persisted to gemini_call_logs (type=twilio) with transcript fragments, start/end timestamps, and duration, visible under the Calls sidebar entry.' },
+          { title: 'Caller dials the DID',  body: 'TATA opens the statically-registered WebSocket to /api/tata/stream and sends a start event carrying streamSid, callSid, and the from/to numbers.' },
+          { title: 'Resolve the agent',     body: 'No outbound config matches the number, so the bridge uses the default phone agent (get_default_phone_agent), falling back to the PHONE_SYSTEM_PROMPT env prompt.' },
+          { title: 'Audio transcoding',     body: 'TATA sends G.711 μ-law 8 kHz. We decode → PCM16 16 kHz for Gemini, and downsample Gemini\'s 24 kHz → μ-law 8 kHz, flushed in fixed 160-byte frames TATA requires.' },
+          { title: 'Greeting + barge-in',   body: 'The agent speaks first_message immediately (caller is already on the line). When the caller interrupts, we send a clear event so TATA flushes the queued playback.' },
+          { title: 'Tools, transfer, KB',   body: 'Same dispatch as browser: HTTP/builtin tools, search_knowledge_base (pgvector), plus phone-only transfer_call (TATA Call Options API), end_call, and report_off_topic.' },
+          { title: 'Logging + recording',   body: 'Logged to gemini_call_logs (type=tata, direction=inbound) with transcript, recording WAV, token + audio-second usage, and the end reason.' },
         ]}
         details={[
           { label: 'Caller audio',  value: 'μ-law 8 kHz' },
           { label: 'Gemini audio',  value: 'PCM16 16/24 kHz' },
-          { label: 'Webhook',       value: '/api/twilio/voice' },
-          { label: 'Media stream',  value: '/api/twilio/stream' },
+          { label: 'Media stream',  value: '/api/tata/stream' },
+          { label: 'Config',        value: '/api/tata/config' },
         ]}
       />
 
-      {/* ── Vobiz ── */}
+      {/* ── TATA Outbound ── */}
       <SpecSection
-        title="Vobiz (Plivo-compatible)"
-        subtitle="Outbound or inbound calls via Vobiz; per-call config (prompt/voice/language) passed through the answer URL."
-        badge="VOBIZ"
-        badgeColor="bg-green-500/10 text-green-600 dark:text-green-400 border-green-500/20"
+        title="TATA Outbound (Click-to-Call)"
+        subtitle="We dial the customer via TATA Click-to-Call; on answer TATA streams the call to the same WS, matched to its per-call config by number."
+        badge="TATA · OUTBOUND"
+        badgeColor="bg-orange-500/10 text-orange-600 dark:text-orange-400 border-orange-500/20"
         diagram={
           <div className="flex flex-col items-center gap-6 min-w-fit">
             <div className="flex items-stretch justify-center flex-nowrap min-w-fit">
-              <FlowNode icon={PhoneCall} label="Recipient" sub="Indian mobile" color="sky" />
-              <FlowLink forward="→ μ-law 8 kHz (voice)" backward="← μ-law 8 kHz (response)" />
-              <FlowNode icon={Cloud} label="Vobiz" sub="Plivo-compatible" color="violet" />
-              <FlowLink forward="→ WebSocket μ-law 8k" backward="← playAudio events" />
-              <FlowNode icon={Server} label="FastAPI" sub="transcode + bridge" color="amber" />
-              <FlowLink forward="→ PCM16 @ 16 kHz" backward="← PCM16 @ 24 kHz" />
-              <FlowNode icon={Cpu} label="Gemini Live" color="emerald" />
+              <FlowNode icon={Server} label="POST /api/tata/call" sub="store CALL_CONFIGS" color="violet" />
+              <FlowLink forward="→ Click-to-Call API" />
+              <FlowNode icon={Cloud} label="TATA Smartflo" sub="rings agent + customer" color="amber" />
+              <FlowLink forward="→ customer answers" backward="← WS media stream" />
+              <FlowNode icon={PhoneCall} label="Customer" sub="Indian mobile" color="sky" />
             </div>
             <div className="flex items-center gap-3 text-[11px] text-muted-foreground bg-muted/40 border border-dashed border-border rounded-lg px-3 py-2">
-              <span className="font-bold uppercase tracking-wide text-foreground/70">Outbound setup</span>
-              <span>1. Frontend POSTs <code className="font-mono">/api/vobiz/call</code></span>
+              <span className="font-bold uppercase tracking-wide text-foreground/70">Flow</span>
+              <span>1. POST <code className="font-mono">/api/tata/call</code> with prompt/voice/tools</span>
               <ArrowRight className="w-3.5 h-3.5" />
-              <span>2. Backend calls Vobiz REST <code className="font-mono">/Call/</code></span>
+              <span>2. TATA dials; on answer hits <code className="font-mono">/api/tata/stream</code></span>
               <ArrowRight className="w-3.5 h-3.5" />
-              <span>3. Vobiz dials; on answer hits our <code className="font-mono">answer_url?cfg=…</code></span>
+              <span>3. Matched to config by destination number</span>
             </div>
             <FlowBranch
-              label="tool_call ↕ on demand"
-              child={<FlowNode icon={Wrench} label="agent_tools.py" sub="get_doctors_by_department" color="rose" />}
+              label="deferred greeting · tools ↕"
+              child={<FlowNode icon={Cpu} label="Gemini Live" sub="per-call prompt/voice" color="emerald" />}
             />
           </div>
         }
         steps={[
-          { title: 'Outbound trigger',     body: 'Frontend POSTs /api/vobiz/call with phone + system_prompt + language + voice. Backend stashes the config under a short UUID and asks Vobiz to dial.' },
-          { title: 'Recipient answers',    body: 'Vobiz hits our answer URL (with ?cfg=<id>). We return XML containing a <Stream> tag pointing to our WebSocket, with the cfg id baked into the URL.' },
-          { title: 'Bidirectional stream', body: 'Vobiz opens a WebSocket to /api/vobiz/stream. We read the cfg, open a Gemini Live session with the requested prompt/voice/language, and start bridging audio.' },
-          { title: 'Audio transcoding',    body: 'Vobiz μ-law 8 kHz ↔ Gemini PCM16 16/24 kHz, same pipeline as Twilio. Both directions use audioop.ratecv for high-quality resampling.' },
-          { title: 'Tools + barge-in',     body: 'agent_tools.py executes locally on tool_call events. When the caller interrupts, Gemini emits sc.interrupted; we send a clearAudio event to Vobiz so playback flushes immediately.' },
-          { title: 'Lifecycle + logging',  body: 'Calls auto-clean per-call configs after 1h. Every call is logged (type=vobiz, direction=outbound|inbound) with full transcript.' },
+          { title: 'Trigger the call',      body: 'POST /api/tata/call with the destination number plus optional system_prompt, first_message, voice, language, tool_ids, KB ids, ambient and transfer_code. The config is stashed in CALL_CONFIGS keyed by the last 10 digits (1h TTL).' },
+          { title: 'TATA places the call',  body: 'Smartflo Click-to-Call rings the agent DID (our streaming leg) and dials the customer, bridging them. async=1 means it dials out without waiting for the agent leg to answer.' },
+          { title: 'Match the config',      body: 'When the stream connects, the start event\'s from/to numbers are matched against CALL_CONFIGS so the call uses its per-call prompt/voice/tools instead of the default phone agent.' },
+          { title: 'Deferred greeting',     body: 'On outbound the stream connects while the customer is still ringing, so the greeting is held until the first inbound audio frame (= customer picked up) — no talking into dead air.' },
+          { title: 'Same conversation core',body: 'From here it is identical to inbound: tools, transfer, off-topic, end_call, ambient filler, transparent reconnect, and barge-in all run the same way.' },
+          { title: 'Logging + recording',   body: 'Logged to gemini_call_logs (type=tata, direction=outbound) with transcript, recording, usage, and end reason. If we end the call while the customer is on, we actively hang up the TATA leg so it stops billing.' },
         ]}
         details={[
-          { label: 'Provider',     value: 'Vobiz (Plivo-compat)' },
-          { label: 'Answer URL',   value: '/api/vobiz/voice' },
-          { label: 'Media stream', value: '/api/vobiz/stream' },
-          { label: 'Outbound API', value: '/api/vobiz/call' },
+          { label: 'Outbound API', value: '/api/tata/call' },
+          { label: 'Media stream', value: '/api/tata/stream' },
+          { label: 'Transfer',     value: 'Call Options (type 4)' },
+          { label: 'Config TTL',   value: '1 hour' },
         ]}
       />
 
@@ -2189,10 +2574,12 @@ function TechSpecsView() {
       <div className="card flex flex-col gap-3">
         <h2 className="text-lg font-bold text-foreground">Shared across all channels</h2>
         <ul className="grid grid-cols-1 sm:grid-cols-2 gap-2 text-sm text-muted-foreground">
-          <li className="flex gap-2"><span className="text-primary font-bold">•</span> <span><strong className="text-foreground">Single tool registry</strong> — <code className="text-xs font-mono bg-muted/50 px-1 py-0.5 rounded">app/gemini/agent_tools.py</code> defines tools once; all three bridges import and dispatch the same functions.</span></li>
-          <li className="flex gap-2"><span className="text-primary font-bold">•</span> <span><strong className="text-foreground">Shared agent prompts</strong> — <code className="text-xs font-mono bg-muted/50 px-1 py-0.5 rounded">app/gemini/agents.py</code> centralises the Healthcare Booking persona so every channel speaks identically.</span></li>
-          <li className="flex gap-2"><span className="text-primary font-bold">•</span> <span><strong className="text-foreground">Transparent reconnects</strong> — preview-model 1006 closures auto-recover (~300 ms gap) without surfacing errors to the caller.</span></li>
-          <li className="flex gap-2"><span className="text-primary font-bold">•</span> <span><strong className="text-foreground">Unified logging</strong> — <code className="text-xs font-mono bg-muted/50 px-1 py-0.5 rounded">gemini_call_logs</code> stores call type, direction, transcript, duration, and status for every session.</span></li>
+          <li className="flex gap-2"><span className="text-primary font-bold">•</span> <span><strong className="text-foreground">One Gemini Live session</strong> — browser, TATA inbound, and TATA outbound all converge on the same session, tool-dispatch, KB, ambient, and logging machinery.</span></li>
+          <li className="flex gap-2"><span className="text-primary font-bold">•</span> <span><strong className="text-foreground">Agent-driven config</strong> — each call resolves a <code className="text-xs font-mono bg-muted/50 px-1 py-0.5 rounded">gemini_agents</code> row (prompt · voice · language · tools · KB · ambient); inbound uses the default phone agent, outbound passes a per-call override.</span></li>
+          <li className="flex gap-2"><span className="text-primary font-bold">•</span> <span><strong className="text-foreground">Tools + Knowledge Base</strong> — HTTP &amp; builtin tools, calendar booking, <code className="text-xs font-mono bg-muted/50 px-1 py-0.5 rounded">search_knowledge_base</code> (pgvector), plus control tools transfer_call / end_call / report_off_topic.</span></li>
+          <li className="flex gap-2"><span className="text-primary font-bold">•</span> <span><strong className="text-foreground">Warm transfer + callback</strong> — phone calls hand off via the TATA Call Options API after an availability check; if no agent is free, we promise a callback and send a WhatsApp template.</span></li>
+          <li className="flex gap-2"><span className="text-primary font-bold">•</span> <span><strong className="text-foreground">Transparent reconnects</strong> — preview-model 1006/1011 closures auto-recover (~300 ms gap); a sustained 503 streak ends the call as MODEL_ERROR and notifies the customer.</span></li>
+          <li className="flex gap-2"><span className="text-primary font-bold">•</span> <span><strong className="text-foreground">Unified logging</strong> — <code className="text-xs font-mono bg-muted/50 px-1 py-0.5 rounded">gemini_call_logs</code> stores call type, direction, transcript, recording, token + audio usage, cost, and end reason for every session.</span></li>
         </ul>
       </div>
     </div>

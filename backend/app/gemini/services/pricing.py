@@ -4,10 +4,15 @@ Per-call cost estimation: Gemini Live token usage + telephony minutes.
 Rates below reflect the project's current providers but are fully overridable
 via environment variables — update them if your contract changes.
 
-Gemini 3.1 Flash Live Preview (audio-to-audio), paid tier, per 1M tokens:
-    input  audio  $3.00   |  output audio  $12.00
-(text-only tokens are cheaper — $0.75 in / $4.50 out — but a voice call is
-audio-dominated, so we price all tokens at the audio rate as a close estimate.)
+Gemini 3.1 Flash Live Preview, paid tier, per 1M tokens, SPLIT BY MODALITY:
+    input  audio  $3.00   |  input  text  $0.75
+    output audio  $12.00  |  output text  $4.50
+We read the per-modality token breakdown from usage_metadata
+(prompt_tokens_details / response_tokens_details) and price each modality at its
+own rate. This is the true billing model: the audio part equals Google's
+per-minute audio price, while the TEXT part captures the system prompt, the
+knowledge-base/RAG context, tool definitions + results (all text input) and the
+thinking/text replies (text output) — none of which the audio rate covers.
 
 Telephony is billed in INR by the carriers:
     TATA  — ₹1100 / number / month, UNLIMITED calls → per-call marginal cost ₹0
@@ -30,9 +35,11 @@ def _f(env: str, default: float) -> float:
         return float(default)
 
 
-# Gemini Live token rates (USD per 1,000,000 tokens) — audio rates.
-GEMINI_INPUT_USD_PER_1M = _f("GEMINI_INPUT_USD_PER_1M", 3.00)
-GEMINI_OUTPUT_USD_PER_1M = _f("GEMINI_OUTPUT_USD_PER_1M", 12.00)
+# Gemini Live rates (USD per 1,000,000 tokens), split by modality.
+GEMINI_AUDIO_IN_USD_PER_1M = _f("GEMINI_AUDIO_IN_USD_PER_1M", 3.00)
+GEMINI_TEXT_IN_USD_PER_1M = _f("GEMINI_TEXT_IN_USD_PER_1M", 0.75)
+GEMINI_AUDIO_OUT_USD_PER_1M = _f("GEMINI_AUDIO_OUT_USD_PER_1M", 12.00)
+GEMINI_TEXT_OUT_USD_PER_1M = _f("GEMINI_TEXT_OUT_USD_PER_1M", 4.50)
 
 # Fallback USD → INR rate. The live rate normally comes from /api/fx-rate
 # (frankfurter.dev / ECB) and is passed into estimate_cost(); this constant is
@@ -55,21 +62,27 @@ MONTHLY_RENT_INR = {
 }
 
 
-def estimate_cost(*, call_type: str | None, input_tokens: int | None,
-                  output_tokens: int | None, duration_s: int | None,
-                  usd_inr_rate: float | None = None) -> dict:
+def estimate_cost(*, call_type: str | None, token_usage: dict | None,
+                  input_seconds: float | None, output_seconds: float | None,
+                  duration_s: int | None, usd_inr_rate: float | None = None) -> dict:
     """Return a cost breakdown dict for one call, in USD and INR.
 
-    Pass ``usd_inr_rate`` (the live /api/fx-rate value); falls back to
-    DEFAULT_USD_INR_RATE when not supplied.
+    ``token_usage`` is the modality split from UsageTracker.totals():
+    {audio_in, text_in, audio_out, text_out}. Gemini is priced per modality;
+    audio_in/out seconds are carried for display only.
     """
-    input_tokens = int(input_tokens or 0)
-    output_tokens = int(output_tokens or 0)
+    tu = token_usage or {}
+    ai = int(tu.get("audio_in") or 0)
+    ti = int(tu.get("text_in") or 0)
+    ao = int(tu.get("audio_out") or 0)
+    to = int(tu.get("text_out") or 0)
     rate = usd_inr_rate or DEFAULT_USD_INR_RATE
 
     gemini_usd = (
-        input_tokens * GEMINI_INPUT_USD_PER_1M
-        + output_tokens * GEMINI_OUTPUT_USD_PER_1M
+        ai * GEMINI_AUDIO_IN_USD_PER_1M
+        + ti * GEMINI_TEXT_IN_USD_PER_1M
+        + ao * GEMINI_AUDIO_OUT_USD_PER_1M
+        + to * GEMINI_TEXT_OUT_USD_PER_1M
     ) / 1_000_000
 
     minutes = (duration_s or 0) / 60.0
@@ -82,9 +95,16 @@ def estimate_cost(*, call_type: str | None, input_tokens: int | None,
     cost_inr = gemini_inr + telephony_inr
 
     return {
-        "input_tokens": input_tokens,
-        "output_tokens": output_tokens,
-        "total_tokens": input_tokens + output_tokens,
+        # token modality split (audio = spoken, text = prompt/KB/tools/thinking)
+        "audio_in_tokens": ai,
+        "text_in_tokens": ti,
+        "audio_out_tokens": ao,
+        "text_out_tokens": to,
+        "input_tokens": ai + ti,
+        "output_tokens": ao + to,
+        "total_tokens": ai + ti + ao + to,
+        "input_audio_min": round((input_seconds or 0) / 60.0, 3),
+        "output_audio_min": round((output_seconds or 0) / 60.0, 3),
         "telephony_min": round(minutes, 2),
         "usd_inr_rate": round(rate, 4),
         # USD
@@ -98,41 +118,110 @@ def estimate_cost(*, call_type: str | None, input_tokens: int | None,
     }
 
 
-class UsageTracker:
-    """Accumulates Gemini Live token usage across a call, surviving reconnects.
+class AudioMeter:
+    """Tallies audio streamed to/from Gemini (PCM16 mono), for display minutes.
 
-    The Live API reports ``usage_metadata`` cumulatively *within a session*; on a
-    reconnect the counters reset to zero. We detect a reset (a counter that goes
-    *down*) and roll the finished session's totals into a committed sum, so the
-    final figure spans every session the call went through.
+    seconds = bytes / (sample_rate × 2). Input is the caller audio we send to
+    Gemini; output is the agent audio Gemini returns.
     """
 
-    __slots__ = ("_cin", "_cout", "_sin", "_sout")
+    __slots__ = ("_in_bytes", "_out_bytes", "_in_rate", "_out_rate")
+
+    def __init__(self, input_rate: int = 16000, output_rate: int = 24000):
+        self._in_bytes = 0
+        self._out_bytes = 0
+        self._in_rate = input_rate
+        self._out_rate = output_rate
+
+    def add_input(self, pcm16: bytes) -> None:
+        if pcm16:
+            self._in_bytes += len(pcm16)
+
+    def add_output(self, pcm16: bytes) -> None:
+        if pcm16:
+            self._out_bytes += len(pcm16)
+
+    @property
+    def input_seconds(self) -> float:
+        return self._in_bytes / (self._in_rate * 2)
+
+    @property
+    def output_seconds(self) -> float:
+        return self._out_bytes / (self._out_rate * 2)
+
+
+def _split_modality(details, total: int) -> tuple[int, int]:
+    """Split a token total into (audio, text) using the modality details list.
+
+    Each detail is a ModalityTokenCount with ``.modality`` (AUDIO/TEXT/…) and
+    ``.token_count``. Unknown modalities (image/video/document) are bucketed as
+    text. When no details are present we fall back to all-audio (a voice call is
+    audio-dominated), which keeps older SDKs from zero-pricing the call.
+    """
+    if not details:
+        return total, 0
+    audio = text = 0
+    for d in details:
+        mod = str(getattr(d, "modality", "") or "").upper()
+        cnt = int(getattr(d, "token_count", 0) or 0)
+        if "AUDIO" in mod:
+            audio += cnt
+        else:
+            text += cnt
+    return audio, text
+
+
+class UsageTracker:
+    """Accumulates Gemini Live token usage by modality, surviving reconnects.
+
+    The Live API reports ``usage_metadata`` cumulatively *within a session*; on a
+    reconnect the counters reset to zero. We detect a reset (the prompt/response
+    total going *down*) and roll the finished session's per-modality totals into a
+    committed sum, so the final figures span every session the call went through.
+    """
+
+    __slots__ = ("_c", "_s", "_sin", "_sout")
+
+    _KEYS = ("audio_in", "text_in", "audio_out", "text_out")
 
     def __init__(self):
-        self._cin = self._cout = 0   # committed totals from prior sessions
-        self._sin = self._sout = 0   # current session's latest cumulative counts
+        self._c = {k: 0 for k in self._KEYS}   # committed (prior sessions)
+        self._s = {k: 0 for k in self._KEYS}   # current session latest cumulative
+        self._sin = 0                          # current session prompt total
+        self._sout = 0                         # current session response total
 
     def update(self, usage_metadata) -> None:
         if usage_metadata is None:
             return
-        pin = int(getattr(usage_metadata, "prompt_token_count", 0) or 0)
+        um = usage_metadata
+        pin = int(getattr(um, "prompt_token_count", 0) or 0)
         pout = int(
-            getattr(usage_metadata, "response_token_count", None)
-            or getattr(usage_metadata, "candidates_token_count", None)
+            getattr(um, "response_token_count", None)
+            or getattr(um, "candidates_token_count", None)
             or 0
         )
-        if pin < self._sin or pout < self._sout:   # counters dropped → session reset
-            self._cin += self._sin
-            self._cout += self._sout
+        if pin < self._sin or pout < self._sout:   # totals dropped → session reset
+            for k in self._KEYS:
+                self._c[k] += self._s[k]
+                self._s[k] = 0
             self._sin = self._sout = 0
         self._sin = max(self._sin, pin)
         self._sout = max(self._sout, pout)
 
+        ai, ti = _split_modality(getattr(um, "prompt_tokens_details", None), pin)
+        ao, to = _split_modality(getattr(um, "response_tokens_details", None), pout)
+        self._s["audio_in"] = max(self._s["audio_in"], ai)
+        self._s["text_in"] = max(self._s["text_in"], ti)
+        self._s["audio_out"] = max(self._s["audio_out"], ao)
+        self._s["text_out"] = max(self._s["text_out"], to)
+
+    def totals(self) -> dict:
+        return {k: self._c[k] + self._s[k] for k in self._KEYS}
+
     @property
     def input_tokens(self) -> int:
-        return self._cin + self._sin
+        return self._c["audio_in"] + self._s["audio_in"] + self._c["text_in"] + self._s["text_in"]
 
     @property
     def output_tokens(self) -> int:
-        return self._cout + self._sout
+        return self._c["audio_out"] + self._s["audio_out"] + self._c["text_out"] + self._s["text_out"]
