@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom'
 import { useQuery } from '@tanstack/react-query'
 import api from '../api/client'
 import { Device, Call } from '@twilio/voice-sdk'
-import { Phone, PhoneOff, Mic, MicOff, ChevronDown, Settings, Home, ListVideo, Eye, X, RefreshCw, Play, Loader2, Mic2, FileCode, ArrowRight, Globe, Cloud, Server, Cpu, PhoneCall, Wrench, Bot, Plus, Pencil, Trash2, Star, Lock, Webhook, FlaskConical, IndianRupee, Volume2, VolumeX, ArrowLeft, Music, BookOpen, FileText, Upload, Search, Database, BarChart3, Clock, TrendingUp, AlertTriangle, Sparkles, Variable, Braces, Info, CalendarDays, ChevronLeft, ChevronRight, CheckCircle2, Stethoscope, User, Download } from 'lucide-react'
+import { Phone, PhoneOff, Mic, MicOff, ChevronDown, Settings, Home, ListVideo, Eye, X, RefreshCw, Play, Loader2, Mic2, FileCode, ArrowRight, Globe, Cloud, Server, Cpu, PhoneCall, Wrench, Bot, Plus, Pencil, Trash2, Star, Lock, Webhook, FlaskConical, IndianRupee, Volume2, VolumeX, ArrowLeft, Music, BookOpen, FileText, Upload, Search, Database, BarChart3, Clock, TrendingUp, AlertTriangle, Sparkles, Variable, Braces, Info, CalendarDays, ChevronLeft, ChevronRight, CheckCircle2, Stethoscope, User, Download, PhoneIncoming, PhoneOutgoing, MessageCircle, Voicemail, UserCheck, Network } from 'lucide-react'
 import Layout from '../components/Layout'
 import useGeminiVoice, { type GeminiStatus } from '../hooks/useGeminiVoice'
 import GeminiAvatar, { AVATARS, DEFAULT_AVATAR_URL, CAMERA_VIEWS, DEFAULT_CAMERA_VIEW, type CameraView } from '../components/GeminiAvatar'
@@ -2150,7 +2150,9 @@ const FLOW_NODES: FlowNodeDef[] = [
 
   { id: 'p_end',    x: 680, y: 2278, w: 320, cls: 'backend',  shape: 'round', title: 'end_call(reason) — finalize log', sub: 'AGENT_ENDED · CLIENT_DISCONNECTED · MODEL_ERROR · COMPLETED' },
   { id: 'p_hangup', x: 320, y: 2278, w: 220, cls: 'carrier',  shape: 'round', title: 'TATA active hangup', sub: 'if we ended & caller still on' },
-  { id: 'p_wa',     x: 1040,y: 2278, w: 230, cls: 'external', shape: 'round', title: 'WhatsApp callback', sub: 'on MODEL_ERROR / no-agent' },
+  { id: 'p_dec',    x: 1040,y: 2278, w: 210, h: 96, cls: 'decision', shape: 'diamond', title: 'Ended cleanly / resolved?', sub: '' },
+  { id: 'p_skip',   x: 1040,y: 2418, w: 240, cls: 'good',     shape: 'round', title: 'No message — all done', sub: 'AGENT_ENDED · COMPLETED · resolved drop' },
+  { id: 'p_wa',     x: 1360,y: 2278, w: 240, cls: 'external', shape: 'round', title: 'Auto WhatsApp follow-up', sub: 'error (NETWORK / MODEL / INTERNAL) · caller dropped unresolved · no-agent callback' },
   { id: 'p_rec',    x: 680, y: 2382, w: 240, cls: 'backend',  shape: 'round', title: 'Save recording WAV', sub: 'set_recording' },
   { id: 'p_price',  x: 680, y: 2476, w: 260, cls: 'backend',  shape: 'round', title: 'Usage totals', sub: 'tokens + audio seconds → pricing' },
   { id: 'p_done',   x: 680, y: 2580, w: 300, cls: 'good',     shape: 'round', title: 'Call saved', sub: 'Calls page: transcript · recording · cost' },
@@ -2214,7 +2216,9 @@ const FLOW_EDGES: FlowEdgeDef[] = [
   ['rk2', 'p_end', { fs: 'bottom', ts: 'right' }],
 
   ['p_end', 'p_hangup', { fs: 'left', ts: 'top' }],
-  ['p_end', 'p_wa', { fs: 'right', ts: 'top' }],
+  ['p_end', 'p_dec', { fs: 'right', ts: 'left' }],
+  ['p_dec', 'p_skip', { label: 'yes', fs: 'bottom', ts: 'top' }],
+  ['p_dec', 'p_wa', { label: 'no', fs: 'right', ts: 'left' }],
   ['p_end', 'p_rec'],
   ['p_rec', 'p_price'],
   ['p_price', 'p_done'],
@@ -2410,17 +2414,240 @@ function FullCallFlowDiagram() {
   )
 }
 
-function TechSpecsView() {
+// ── Client-facing flow (high-level, non-technical) ───────────────────────────
+
+/** Small downward connector with an optional caption — used in the client flow. */
+function FlowDown({ label }: { label?: string }) {
   return (
-    <div className="flex-1 flex flex-col min-h-0 p-6 gap-6 overflow-y-auto">
-      <div>
-        <h1 className="text-xl font-bold text-foreground">Technical Architecture</h1>
-        <p className="text-sm text-muted-foreground mt-0.5">
-          How real-time voice flows from each entry point through Google's Gemini Live API and back.
+    <div className="flex flex-col items-center gap-1.5 py-1">
+      <div className="w-px h-4 bg-border" />
+      {label && (
+        <span className="text-[10px] font-medium text-muted-foreground bg-muted px-2 py-0.5 rounded-full whitespace-nowrap">
+          {label}
+        </span>
+      )}
+      <ChevronDown className="w-4 h-4 text-muted-foreground" />
+    </div>
+  )
+}
+
+/** "What happens if…" card — a single edge-case scenario for the client flow. */
+function ScenarioCard({ icon: Icon, color, title, when, then }: {
+  icon: ComponentType<{ className?: string }>
+  color: NodeColor
+  title: string
+  when: string
+  then: string
+}) {
+  return (
+    <div className="flex flex-col gap-2.5 p-4 rounded-xl border border-border bg-muted/20">
+      <div className="flex items-center gap-2.5">
+        <div className={`flex-shrink-0 w-9 h-9 rounded-lg border flex items-center justify-center ${NODE_STYLES[color]}`}>
+          <Icon className="w-5 h-5" />
+        </div>
+        <p className="text-sm font-bold text-foreground leading-tight">{title}</p>
+      </div>
+      <p className="text-xs text-muted-foreground leading-relaxed">
+        <span className="font-semibold text-foreground/70">If </span>{when}
+      </p>
+      <p className="text-xs text-foreground/90 leading-relaxed">
+        <span className="font-semibold text-primary">→ </span>{then}
+      </p>
+    </div>
+  )
+}
+
+/** A single capability the agent uses live during a call. */
+function CapabilityNode({ icon: Icon, label, sub, color }: {
+  icon: ComponentType<{ className?: string }>
+  label: string
+  sub: string
+  color: NodeColor
+}) {
+  return (
+    <div className="flex flex-col items-center gap-1.5">
+      <div className="w-px h-4 bg-border" />
+      <div className={`flex flex-col items-center text-center px-3 py-3 rounded-xl border ${NODE_STYLES[color]} w-[150px] shadow-sm`}>
+        <Icon className="w-6 h-6 mb-1.5" />
+        <span className="text-[13px] font-bold leading-tight">{label}</span>
+        <span className="text-[10px] opacity-70 mt-1 leading-tight">{sub}</span>
+      </div>
+    </div>
+  )
+}
+
+function ClientFlowDiagram() {
+  return (
+    <div className="flex flex-col items-center gap-1 min-w-fit">
+      {/* ── 1. Entry points — all converge on the same agent ── */}
+      <div className="flex items-stretch justify-center gap-3 flex-wrap">
+        <FlowNode icon={Globe}         label="Website Call" sub="Visitor clicks “Talk to us”" color="sky" />
+        <FlowNode icon={PhoneIncoming} label="Incoming Call" sub="Customer dials your number" color="sky" />
+        <FlowNode icon={PhoneOutgoing} label="We Call Out"   sub="Agent dials the customer" color="sky" />
+      </div>
+      <FlowDown label="all three reach the same AI agent" />
+
+      {/* ── 2. The agent core ── */}
+      <FlowNode icon={Bot} label="AI Voice Agent" sub="Answers instantly · your brand voice & language" color="violet" />
+
+      {/* ── 3. Live capabilities — what the agent draws on during the call ── */}
+      <div className="w-px h-4 bg-border" />
+      <div className="w-full max-w-[760px] rounded-2xl border-2 border-dashed border-violet-500/30 bg-violet-500/[0.04] px-5 pt-3 pb-5 flex flex-col items-center gap-2">
+        <span className="text-[11px] font-bold uppercase tracking-wide text-violet-600 dark:text-violet-400">
+          During the conversation — all in one natural call
+        </span>
+        <div className="flex items-start justify-center gap-3 flex-wrap">
+          <CapabilityNode icon={BookOpen}     label="Knowledge Base"   sub="Answers from your own docs & FAQs" color="emerald" />
+          <CapabilityNode icon={Wrench}       label="Tools & Actions"  sub="Books appointments · checks orders · live data" color="amber" />
+          <CapabilityNode icon={Music}        label="Ambient Sound"    sub="Natural background masks any thinking pause" color="sky" />
+          <CapabilityNode icon={UserCheck}    label="Human Transfer"   sub="Hands off to a live agent when needed" color="rose" />
+        </div>
+        <p className="text-[10px] text-muted-foreground text-center max-w-md mt-1 leading-relaxed">
+          When the agent looks something up or runs a tool, ambient sound keeps the call feeling natural — the
+          customer never hears dead air. It also listens while speaking, so it stops the moment they jump in.
         </p>
       </div>
 
-      {/* ── End-to-end call flow (all use cases) ── */}
+      {/* ── 4. The call ends — branches on HOW it ended ── */}
+      <FlowDown label="the call wraps up" />
+      <div className="flex flex-col items-center px-3 py-3 rounded-xl border-2 border-amber-500/30 bg-amber-500/[0.06] text-amber-700 dark:text-amber-300 w-[200px] shadow-sm">
+        <PhoneOff className="w-6 h-6 mb-1.5" />
+        <span className="text-sm font-bold leading-tight text-center">How did the call end?</span>
+      </div>
+
+      {/* split connector */}
+      <div className="flex items-stretch justify-center w-full max-w-[640px] pt-1">
+        <div className="flex-1 border-t-2 border-l-2 border-border rounded-tl-xl h-4 mr-[1px]" />
+        <div className="flex-1 border-t-2 border-r-2 border-border rounded-tr-xl h-4 ml-[1px]" />
+      </div>
+
+      <div className="flex items-start justify-center gap-10 sm:gap-20 flex-wrap">
+        {/* Clean ending → nothing happens */}
+        <div className="flex flex-col items-center gap-1.5">
+          <span className="text-[10px] font-medium text-emerald-600 dark:text-emerald-400 bg-emerald-500/10 px-2 py-0.5 rounded-full whitespace-nowrap">
+            ✓ ended normally
+          </span>
+          <ChevronDown className="w-4 h-4 text-muted-foreground" />
+          <FlowNode icon={CheckCircle2} label="All Done" sub="Goal met, agent ended, or caller said bye — no follow-up needed" color="emerald" />
+        </div>
+
+        {/* Bad ending → WhatsApp */}
+        <div className="flex flex-col items-center gap-1.5">
+          <span className="text-[10px] font-medium text-rose-600 dark:text-rose-400 bg-rose-500/10 px-2 py-0.5 rounded-full whitespace-nowrap">
+            ✕ dropped mid-call or errored
+          </span>
+          <ChevronDown className="w-4 h-4 text-muted-foreground" />
+          <FlowNode icon={MessageCircle} label="Auto WhatsApp Follow-up" sub="Caller hung up unresolved, or a network/technical error — message sent automatically" color="rose" />
+        </div>
+      </div>
+    </div>
+  )
+}
+
+function TechSpecsView() {
+  type SpecTab = 'client' | 'detailed' | 'other'
+  const [specTab, setSpecTab] = useState<SpecTab>('client')
+
+  const SPEC_TABS: { id: SpecTab; label: string; icon: typeof Bot }[] = [
+    { id: 'client',   label: 'Client Flow',   icon: User },
+    { id: 'detailed', label: 'Detailed Flow', icon: Network },
+    { id: 'other',    label: 'Other Flows',   icon: ListVideo },
+  ]
+
+  return (
+    <div className="flex-1 flex flex-col min-h-0 p-6 gap-6 overflow-y-auto">
+      <div>
+        <h1 className="text-xl font-bold text-foreground">How It Works</h1>
+        <p className="text-sm text-muted-foreground mt-0.5">
+          From a simple client overview to the full technical architecture of every call.
+        </p>
+      </div>
+
+      {/* ── Sub-tab switcher ── */}
+      <div className="flex items-center gap-1 border-b border-border -mt-1">
+        {SPEC_TABS.map(t => {
+          const Icon = t.icon
+          const active = specTab === t.id
+          return (
+            <button
+              key={t.id}
+              onClick={() => setSpecTab(t.id)}
+              className={`relative flex items-center gap-2 px-4 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
+                active ? 'border-primary text-primary' : 'border-transparent text-muted-foreground hover:text-foreground'
+              }`}
+            >
+              <Icon className="w-4 h-4" />
+              {t.label}
+            </button>
+          )
+        })}
+      </div>
+
+      {/* ════════════ CLIENT FLOW ════════════ */}
+      {specTab === 'client' && (<>
+      <div className="card flex flex-col gap-4">
+        <div className="flex items-start justify-between gap-4 flex-wrap">
+          <div>
+            <h2 className="text-lg font-bold text-foreground">The Customer Journey</h2>
+            <p className="text-sm text-muted-foreground mt-0.5">
+              Every call — from the web, an incoming call, or one we place — flows through the same simple,
+              reliable journey. No jargon, just what your customer experiences.
+            </p>
+          </div>
+          <span className="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-bold border bg-violet-500/10 text-violet-600 dark:text-violet-400 border-violet-500/20">
+            OVERVIEW
+          </span>
+        </div>
+        <div className="bg-muted/20 border border-border rounded-xl p-6 overflow-x-auto">
+          <ClientFlowDiagram />
+        </div>
+      </div>
+
+      <div className="card flex flex-col gap-4">
+        <div>
+          <h2 className="text-lg font-bold text-foreground">Smart Handling — what happens if…</h2>
+          <p className="text-sm text-muted-foreground mt-0.5">
+            The agent is built for the messy real world. These edge cases are handled automatically, so no
+            customer slips through the cracks.
+          </p>
+        </div>
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+          <ScenarioCard
+            icon={Voicemail} color="amber" title="Reaches a voicemail"
+            when="an outbound call lands on a voicemail or automated IVR instead of a real person,"
+            then="the agent recognises the recorded greeting and hangs up right away — we never talk to or leave a message on a machine."
+          />
+          <ScenarioCard
+            icon={PhoneOff} color="rose" title="Caller drops mid-call"
+            when="the customer hangs up before their question is fully resolved,"
+            then="we detect the drop and automatically send them a WhatsApp follow-up so they can pick up where they left off."
+          />
+          <ScenarioCard
+            icon={UserCheck} color="sky" title="No human is free"
+            when="the caller asks for a person but no human agent is available,"
+            then="the agent promises a callback and sends a WhatsApp confirmation — nobody is left waiting on hold."
+          />
+          <ScenarioCard
+            icon={RefreshCw} color="violet" title="Network hiccup"
+            when="the connection briefly drops during the conversation,"
+            then="the call silently reconnects in about a third of a second — the caller just hears a tiny pause and keeps talking."
+          />
+          <ScenarioCard
+            icon={AlertTriangle} color="rose" title="Something goes wrong"
+            when="a technical error means the call can't continue,"
+            then="the call ends gracefully and a WhatsApp follow-up goes out so the customer is still looked after."
+          />
+          <ScenarioCard
+            icon={Mic} color="emerald" title="Caller interrupts"
+            when="the customer starts talking while the agent is still speaking,"
+            then="the agent instantly stops and listens — just like a natural human conversation."
+          />
+        </div>
+      </div>
+      </>)}
+
+      {/* ════════════ DETAILED FLOW ════════════ */}
+      {specTab === 'detailed' && (
       <div className="card flex flex-col gap-4">
         <div className="flex items-start justify-between gap-4 flex-wrap">
           <div>
@@ -2431,13 +2658,23 @@ function TechSpecsView() {
             </p>
           </div>
           <span className="inline-flex items-center px-2.5 py-1 rounded-md text-xs font-bold border bg-orange-500/10 text-orange-600 dark:text-orange-400 border-orange-500/20">
-            OVERVIEW
+            TECHNICAL
           </span>
         </div>
         <FullCallFlowDiagram />
         <p className="text-[11px] text-muted-foreground">
           One Gemini Live session per call · reconnect is transparent to the caller · ambient filler masks the
           tool-call gap · scroll to pan the full diagram.
+        </p>
+      </div>
+      )}
+
+      {/* ════════════ OTHER FLOWS (per-channel deep dives) ════════════ */}
+      {specTab === 'other' && (<>
+      <div>
+        <h2 className="text-lg font-bold text-foreground">Per-Channel Technical Flows</h2>
+        <p className="text-sm text-muted-foreground mt-0.5">
+          How real-time voice flows from each entry point through Google's Gemini Live API and back.
         </p>
       </div>
 
@@ -2582,6 +2819,7 @@ function TechSpecsView() {
           <li className="flex gap-2"><span className="text-primary font-bold">•</span> <span><strong className="text-foreground">Unified logging</strong> — <code className="text-xs font-mono bg-muted/50 px-1 py-0.5 rounded">gemini_call_logs</code> stores call type, direction, transcript, recording, token + audio usage, cost, and end reason for every session.</span></li>
         </ul>
       </div>
+      </>)}
     </div>
   )
 }
