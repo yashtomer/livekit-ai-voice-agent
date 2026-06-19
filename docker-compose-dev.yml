@@ -27,88 +27,89 @@ name: ai-voice-cost-calc
 services:
 
   # ─── Whisper STT containers ───
-  whisper-base:
-    image: fedirz/faster-whisper-server:latest-cpu
-    ports: ["127.0.0.1:8882:8000"]
-    environment:
-      - WHISPER__MODEL=Systran/faster-whisper-base.en
-      - WHISPER__COMPUTE_TYPE=int8
-      - WHISPER__DEFAULT_LANGUAGE=en
-      - OMP_NUM_THREADS=4
-    restart: unless-stopped
+  # whisper-base:
+  #   image: fedirz/faster-whisper-server:latest-cpu
+  #   ports: ["127.0.0.1:8882:8000"]
+  #   environment:
+  #     - WHISPER__MODEL=Systran/faster-whisper-base.en
+  #     - WHISPER__COMPUTE_TYPE=int8
+  #     - WHISPER__DEFAULT_LANGUAGE=en
+  #     - OMP_NUM_THREADS=4
+  #   restart: unless-stopped
 
-  whisper-small:
-    image: fedirz/faster-whisper-server:latest-cpu
-    ports: ["127.0.0.1:8883:8000"]
-    environment:
-      - WHISPER__MODEL=Systran/faster-whisper-small.en
-      - WHISPER__COMPUTE_TYPE=int8
-      - WHISPER__DEFAULT_LANGUAGE=en
-      - OMP_NUM_THREADS=4
-    restart: unless-stopped
+  # whisper-small:
+  #   image: fedirz/faster-whisper-server:latest-cpu
+  #   ports: ["127.0.0.1:8883:8000"]
+  #   environment:
+  #     - WHISPER__MODEL=Systran/faster-whisper-small.en
+  #     - WHISPER__COMPUTE_TYPE=int8
+  #     - WHISPER__DEFAULT_LANGUAGE=en
+  #     - OMP_NUM_THREADS=4
+  #   restart: unless-stopped
 
-  whisper-tiny:
-    image: fedirz/faster-whisper-server:latest-cpu
-    ports: ["127.0.0.1:8881:8000"]
-    environment:
-      - WHISPER__MODEL=Systran/faster-whisper-tiny.en
-      - WHISPER__COMPUTE_TYPE=int8
-      - WHISPER__DEFAULT_LANGUAGE=en
-      - OMP_NUM_THREADS=4
-    restart: unless-stopped
+  # whisper-tiny:
+  #   image: fedirz/faster-whisper-server:latest-cpu
+  #   ports: ["127.0.0.1:8881:8000"]
+  #   environment:
+  #     - WHISPER__MODEL=Systran/faster-whisper-tiny.en
+  #     - WHISPER__COMPUTE_TYPE=int8
+  #     - WHISPER__DEFAULT_LANGUAGE=en
+  #     - OMP_NUM_THREADS=4
+  #   restart: unless-stopped
 
-  whisper-base-multi:
-    image: fedirz/faster-whisper-server:latest-cpu
-    ports: ["127.0.0.1:8884:8000"]
-    environment:
-      - WHISPER__MODEL=Systran/faster-whisper-base
-      - WHISPER__COMPUTE_TYPE=int8
-      - OMP_NUM_THREADS=4
-    restart: unless-stopped
+  # whisper-base-multi:
+  #   image: fedirz/faster-whisper-server:latest-cpu
+  #   ports: ["127.0.0.1:8884:8000"]
+  #   environment:
+  #     - WHISPER__MODEL=Systran/faster-whisper-base
+  #     - WHISPER__COMPUTE_TYPE=int8
+  #     - OMP_NUM_THREADS=4
+  #   restart: unless-stopped
 
-  whisper-small-multi:
-    image: fedirz/faster-whisper-server:latest-cpu
-    ports: ["127.0.0.1:8885:8000"]
-    environment:
-      - WHISPER__MODEL=Systran/faster-whisper-small
-      - WHISPER__COMPUTE_TYPE=int8
-      - OMP_NUM_THREADS=4
-    restart: unless-stopped
+  # whisper-small-multi:
+  #   image: fedirz/faster-whisper-server:latest-cpu
+  #   ports: ["127.0.0.1:8885:8000"]
+  #   environment:
+  #     - WHISPER__MODEL=Systran/faster-whisper-small
+  #     - WHISPER__COMPUTE_TYPE=int8
+  #     - OMP_NUM_THREADS=4
+  #   restart: unless-stopped
 
   # ─── Piper TTS ───
-  tts:
-    image: ghcr.io/matatonic/openedai-speech:latest
-    ports: ["127.0.0.1:8886:8000"]
-    volumes:
-      - tts-voices:/app/voices
-    restart: unless-stopped
+  # tts:
+  #   image: ghcr.io/matatonic/openedai-speech:latest
+  #   ports: ["127.0.0.1:8886:8000"]
+  #   volumes:
+  #     - tts-voices:/app/voices
+  #   restart: unless-stopped
 
   # ─── Voicebox (optional — enable with `--profile voicebox`) ───
-  voicebox:
-    profiles: ["voicebox"]
-    image: voicebox-voicebox:latest
-    build: ./voicebox
-    pull_policy: never
-    container_name: voicebox
-    ports:
-      - "${HOST_BIND:-127.0.0.1}:${VOICEBOX_PORT:-17493}:17493"
-    volumes:
-      - ./voicebox/output:/app/data/generations
-      - voicebox-data:/app/data
-      - huggingface-cache:/home/voicebox/.cache/huggingface
-    environment:
-      - LOG_LEVEL=info
-      - NUMBA_CACHE_DIR=/tmp/numba_cache
-      - OMP_NUM_THREADS=6
-      - MKL_NUM_THREADS=6
-      - NUMEXPR_NUM_THREADS=6
-      - TOKENIZERS_PARALLELISM=false
-    deploy:
-      resources:
-        limits:
-          cpus: '6'
-          memory: 6G
-    restart: unless-stopped
+  # voicebox:
+  #   profiles: ["voicebox"]
+  #   image: voicebox-voicebox:latest
+  #   build: ./voicebox
+  #   pull_policy: never
+  #   container_name: voicebox
+  #   ports:
+  #     - "${HOST_BIND:-127.0.0.1}:${VOICEBOX_PORT:-17493}:17493"
+  #   volumes:
+  #     - ./voicebox/output:/app/data/generations
+  #     - voicebox-data:/app/data
+  #     - huggingface-cache:/home/voicebox/.cache/huggingface
+  #   environment:
+  #     - LOG_LEVEL=info
+  #     - NUMBA_CACHE_DIR=/tmp/numba_cache
+  #     - OMP_NUM_THREADS=6
+  #     - MKL_NUM_THREADS=6
+  #     - NUMEXPR_NUM_THREADS=6
+  #     - TOKENIZERS_PARALLELISM=false
+  #   deploy:
+  #     resources:
+  #       limits:
+  #         cpus: '6'
+  #         memory: 6G
+  #   restart: unless-stopped
+
 
   # ─── Backend (FastAPI + WhatsApp/Ultravox WebRTC bridge) ───
   # network_mode: host is required for the WhatsApp WebRTC bridge — STUN must
@@ -116,10 +117,11 @@ services:
   # All internal services expose localhost ports so the backend can reach them.
   backend:
     build: ./backend
-    network_mode: host
+    ports:
+      - "8000:8000"
     environment:
       - AGENT_NAME=${AGENT_NAME:-cost-calc-agent}
-      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@localhost:5432/${POSTGRES_DB:-voiceagent}
+      - DATABASE_URL=postgresql+asyncpg://${POSTGRES_USER:-postgres}:${POSTGRES_PASSWORD:-password}@${POSTGRES_HOST:-host.docker.internal}:${POSTGRES_PORT:-5432}/${POSTGRES_DB:-voiceagent}
       - SECRET_KEY=${SECRET_KEY:-dev-secret-key-change-in-production}
       - FERNET_KEY=${FERNET_KEY:-***REMOVED***}
       - INTERNAL_AGENT_SECRET=${INTERNAL_AGENT_SECRET:-dev-internal-agent-secret-change-in-production}
@@ -193,7 +195,7 @@ services:
       - LIVEKIT_API_SECRET=${LIVEKIT_API_SECRET:-secret}
       # Server-to-server channel for fetching per-room API keys from the
       # backend so they never travel through the browser/JWT.
-      - BACKEND_INTERNAL_URL=http://host.docker.internal:8000
+      - BACKEND_INTERNAL_URL=http://backend:8000
       - INTERNAL_AGENT_SECRET=${INTERNAL_AGENT_SECRET:-dev-internal-agent-secret-change-in-production}
       - OLLAMA_URL=http://host.docker.internal:11434
       - VOICEBOX_URL=http://voicebox:17493
@@ -213,8 +215,6 @@ services:
       - default
       - voice-shared
     depends_on:
-      - whisper-base
-      - tts
       - backend
     extra_hosts:
       - "host.docker.internal:host-gateway"
@@ -222,9 +222,9 @@ services:
 
 
 volumes:
-  tts-voices:
-  voicebox-data:
-  huggingface-cache:
+#  tts-voices:
+#  voicebox-data:
+#  huggingface-cache:
   livekit-hf-cache:
   quality-data:
 

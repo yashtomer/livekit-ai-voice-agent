@@ -1,7 +1,7 @@
 import { useState } from 'react'
 import { Link, useLocation, useNavigate } from 'react-router-dom'
 import {
-  LayoutDashboard, Shield, Settings, LogOut, ChevronDown, User, Sun, Moon, Phone,
+  LayoutDashboard, Shield, Settings, LogOut, ChevronDown, User, Sun, Moon, Phone, ExternalLink,
 } from 'lucide-react'
 import { useAuthStore } from '../../store/authStore'
 import { useUIStore } from '../../store/uiStore'
@@ -88,6 +88,15 @@ export default function Layout({ children }: LayoutProps) {
             >
               <span className="hidden sm:block">Gemini</span>
             </Link>
+            <a
+              href="https://aiappoinment.aeologic.in/"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium transition-all text-muted-foreground hover:text-foreground hover:bg-muted"
+            >
+              <ExternalLink className="w-3.5 h-3.5" />
+              <span className="hidden sm:block">Livekit AI App</span>
+            </a>
           </nav>
 
           {/* Right actions */}

@@ -5330,22 +5330,25 @@ type View = 'home' | 'calls' | 'analytics' | 'voices' | 'techspecs' | 'agents' |
 
 export default function GeminiPage() {
   const templates = useAgentTemplates(TEMPLATES)
+  // Default the agent picker to the Healthcare template (falls back to 0).
+  const defaultIdx = Math.max(0, TEMPLATES.findIndex(t => /healthcare/i.test(t.label)))
   const [view, setView] = useState<View>('home')
   const [mode, setMode] = useState<Mode>('browser')
   const [language, setLanguage] = useState('en')
-  const [templateIdx, setTemplateIdx] = useState(0)
-  const [systemPrompt, setSystemPrompt] = useState(templates[0]?.prompt || '')
-  const [firstMessage, setFirstMessage] = useState(templates[0]?.first_message || '')
+  const [templateIdx, setTemplateIdx] = useState(defaultIdx)
+  const [systemPrompt, setSystemPrompt] = useState(templates[defaultIdx]?.prompt || '')
+  const [firstMessage, setFirstMessage] = useState(templates[defaultIdx]?.first_message || '')
   const [muted, setMuted] = useState(false)
   const [voice, setVoice] = useState('Aoede')
   const [avatarUrl, setAvatarUrl] = useState<string>(DEFAULT_AVATAR_URL)
-  const [cameraView, setCameraView] = useState<CameraView>(DEFAULT_CAMERA_VIEW)
-  const [toolIds, setToolIds] = useState<number[]>(templates[0]?.tool_ids || [])
-  const [kbCollectionIds, setKbCollectionIds] = useState<number[]>(templates[0]?.kb_collection_ids || [])
-  const [ambientAlways, setAmbientAlways] = useState<string | null>(templates[0]?.ambient_always ?? null)
-  const [ambientToolCall, setAmbientToolCall] = useState<string | null>(templates[0]?.ambient_tool_call ?? null)
-  const [ambientVolume, setAmbientVolume] = useState<number>(templates[0]?.ambient_volume ?? 0.15)
+  const [cameraView, setCameraView] = useState<CameraView>('upper')
+  const [toolIds, setToolIds] = useState<number[]>(templates[defaultIdx]?.tool_ids || [])
+  const [kbCollectionIds, setKbCollectionIds] = useState<number[]>(templates[defaultIdx]?.kb_collection_ids || [])
+  const [ambientAlways, setAmbientAlways] = useState<string | null>(templates[defaultIdx]?.ambient_always ?? null)
+  const [ambientToolCall, setAmbientToolCall] = useState<string | null>(templates[defaultIdx]?.ambient_tool_call ?? null)
+  const [ambientVolume, setAmbientVolume] = useState<number>(templates[defaultIdx]?.ambient_volume ?? 0.15)
   const transcriptEndRef = useRef<HTMLDivElement>(null)
+  const userPickedTemplateRef = useRef(false)
 
   const { openConfigModal } = useUIStore()
 
@@ -5356,7 +5359,7 @@ export default function GeminiPage() {
     transcriptEndRef.current?.scrollIntoView({ behavior: 'smooth' })
   }, [transcript])
 
-  function handleTemplateChange(idx: number) {
+  function applyTemplate(idx: number) {
     setTemplateIdx(idx)
     const t = templates[idx]
     if (t) {
@@ -5371,6 +5374,20 @@ export default function GeminiPage() {
       setAmbientVolume(t.ambient_volume ?? 0.15)
     }
   }
+
+  function handleTemplateChange(idx: number) {
+    userPickedTemplateRef.current = true
+    applyTemplate(idx)
+  }
+
+  // Templates load async from the backend in a different order than the static
+  // fallback, so resolve "Healthcare Booking" by label once they arrive — unless
+  // the user has already picked an agent themselves.
+  useEffect(() => {
+    if (userPickedTemplateRef.current) return
+    const idx = templates.findIndex(t => /healthcare/i.test(t.label))
+    if (idx >= 0 && idx !== templateIdx) applyTemplate(idx)
+  }, [templates]) // eslint-disable-line react-hooks/exhaustive-deps
 
   async function handleStart() {
     clearError()
