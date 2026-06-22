@@ -5386,8 +5386,19 @@ export default function GeminiPage() {
   useEffect(() => {
     if (userPickedTemplateRef.current) return
     const idx = templates.findIndex(t => /healthcare/i.test(t.label))
-    if (idx >= 0 && idx !== templateIdx) applyTemplate(idx)
-  }, [templates]) // eslint-disable-line react-hooks/exhaustive-deps
+    const t = templates[idx]
+    if (!t) return
+    setTemplateIdx(idx)
+    setSystemPrompt(t.prompt)
+    setFirstMessage(t.first_message || '')
+    if (t.voice) setVoice(t.voice)
+    if (t.language) setLanguage(t.language)
+    setToolIds(t.tool_ids || [])
+    setKbCollectionIds(t.kb_collection_ids || [])
+    setAmbientAlways(t.ambient_always ?? null)
+    setAmbientToolCall(t.ambient_tool_call ?? null)
+    setAmbientVolume(t.ambient_volume ?? 0.15)
+  }, [templates])
 
   async function handleStart() {
     clearError()
